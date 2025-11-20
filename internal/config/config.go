@@ -36,6 +36,15 @@ type Config struct {
 	// enabled. Debug logging is useful during development and debugging,
 	// but may be too noisy for production usage.
 	EnableDebugLogging bool
+
+	// CacheTTL controls how long successful GET responses may be kept
+	// in the in-memory HTTP cache before they are considered stale.
+	CacheTTL time.Duration
+
+	// MaxCacheEntries bounds the number of entries stored in the
+	// in-memory HTTP cache. When this limit is exceeded, older entries
+	// are evicted in a simple best-effort manner.
+	MaxCacheEntries int
 }
 
 // Default constructs a Config with safe, conservative defaults.
@@ -43,12 +52,15 @@ type Config struct {
 // These defaults are chosen to be reasonable for a wide range of
 // applications. Callers can adjust them through the public functional
 // options defined in the aether package.
+// Default constructs a Config with safe, conservative defaults.
 func Default() *Config {
 	return &Config{
-		UserAgent:          "",               // filled by aether.NewClient if empty
-		RequestTimeout:     15 * time.Second, // conservative baseline
-		MaxConcurrentHosts: 4,                // modest parallelism
-		MaxRequestsPerHost: 4,                // per-host politeness limit
+		UserAgent:          "", // filled by aether.NewClient if empty
+		RequestTimeout:     defaultRequestTimeout,
+		MaxConcurrentHosts: defaultMaxConcurrentHosts,
+		MaxRequestsPerHost: defaultMaxRequestsPerHost,
 		EnableDebugLogging: false,
+		CacheTTL:           defaultCacheTTL,
+		MaxCacheEntries:    defaultMaxCacheEntries,
 	}
 }

@@ -6,8 +6,9 @@
 // serialize it to both JSON and TOON formats for LLM usage.
 //
 // Stage 1: This file defines the root Client, configuration options,
-// and a version helper. Higher-level features such as Search, Lookup,
-// and Crawl will be added in later stages.
+// and a version helper.
+// Stage 2: The Client now owns an internal HTTP fetcher that implements
+// robots.txt-compliant HTTP GET with concurrency limits and caching.
 package aether
 
 import (
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Nibir1/Aether/internal/config"
+	hclient "github.com/Nibir1/Aether/internal/httpclient"
 	"github.com/Nibir1/Aether/internal/log"
 	"github.com/Nibir1/Aether/internal/version"
 )
@@ -29,11 +31,12 @@ const DefaultUserAgent = "AetherBot/1.0 (+https://github.com/Nibir1/Aether)"
 // Client is the main public handle for using Aether.
 //
 // All high-level capabilities such as Search, Lookup, Batch and Crawl
-// will be implemented as methods on Client in later stages. For now,
-// Client encapsulates configuration and logging.
+// will be implemented as methods on Client in later stages. As of Stage 2,
+// Client also encapsulates an internal HTTP fetcher.
 type Client struct {
-	cfg    *config.Config
-	logger log.Logger
+	cfg     *config.Config
+	logger  log.Logger
+	fetcher *hclient.Client
 }
 
 // Config is the public view of Aether configuration.
@@ -59,11 +62,10 @@ type Option func(*config.Config)
 //
 // It starts from the internal default configuration, applies all
 // provided Option functions, ensures a reasonable User-Agent string is
-// set, and initializes a logger.
+// set, initializes a logger and constructs an internal HTTP fetcher.
 //
-// At Stage 1, the Client does not yet perform network operations; it
-// simply establishes the configuration backbone that later stages
-// (Fetch, Search, Crawl, etc.) will rely upon.
+// At Stage 2, the Client can perform robots.txt-compliant HTTP GET
+// requests via the Fetch method.
 func NewClient(opts ...Option) (*Client, error) {
 	internalCfg := config.Default()
 
@@ -79,10 +81,12 @@ func NewClient(opts ...Option) (*Client, error) {
 	}
 
 	logger := log.New(internalCfg.EnableDebugLogging)
+	fetcher := hclient.New(internalCfg, logger)
 
 	return &Client{
-		cfg:    internalCfg,
-		logger: logger,
+		cfg:     internalCfg,
+		logger:  logger,
+		fetcher: fetcher,
 	}, nil
 }
 
@@ -100,7 +104,7 @@ func WithUserAgent(ua string) Option {
 }
 
 // WithRequestTimeout sets the HTTP request timeout used by Aether's
-// future network operations.
+// network operations.
 //
 // Very short timeouts may cause frequent failures; very long timeouts
 // may delay recovery from issues. Sensible values are typically in the

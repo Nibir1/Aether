@@ -20,6 +20,14 @@ const (
 	// defaultMaxRequestsPerHost is the default limit on in-flight
 	// requests to a single host, used to avoid overwhelming any one site.
 	defaultMaxRequestsPerHost = 4
+
+	// defaultCacheTTL is the default time-to-live for cached HTTP
+	// responses in the in-memory cache.
+	defaultCacheTTL = 30 * time.Second
+
+	// defaultMaxCacheEntries is the default upper bound on the number
+	// of responses kept in the in-memory HTTP cache.
+	defaultMaxCacheEntries = 128
 )
 
 // applyDefaults populates zero-valued fields in Config with the library's
