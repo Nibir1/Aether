@@ -2,7 +2,12 @@
 //
 // Package httpclient implements Aether's internal HTTP client.
 // It provides robots.txt-compliant HTTP GET with concurrency limits,
-// basic in-memory caching and retry logic.
+// unified caching (memory/file/redis), retry logic, and transparent
+// User-Agent handling.
+//
+// Stage 3: Updated to use the full composite cache subsystem from
+// internal/cache rather than the lightweight Stage 2 memory cache.
+
 package httpclient
 
 import (
@@ -13,32 +18,38 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Nibir1/Aether/internal/cache"
 	"github.com/Nibir1/Aether/internal/config"
 	"github.com/Nibir1/Aether/internal/errors"
 	"github.com/Nibir1/Aether/internal/log"
 )
 
-// Error is a convenient alias for the structured error type used by
-// the HTTP client. It matches Aether's public Error type.
+// Error is Aether’s internal structured error type (re-exported).
 type Error = errors.Error
 
 // Client is Aether's internal HTTP client.
 //
-// It should not be used directly by consumers of the aether package;
-// instead, they call Client.Fetch at the aether level.
+// NOTE:
+// - Consumers do NOT use this directly.
+// - The public aether.Client wraps this and provides Fetch().
 type Client struct {
 	cfg     *config.Config
 	logger  log.Logger
 	http    *http.Client
 	robots  *robotsCache
 	limiter *hostLimiter
-	cache   *memoryCache
+	cache   cache.Cache // NEW: unified memory/file/redis cache
 }
 
-// New constructs a new HTTP client with the provided configuration
-// and logger. It reuses a single http.Client to benefit from connection
-// pooling.
-func New(cfg *config.Config, logger log.Logger) *Client {
+// New constructs a new internal HTTP client.
+//
+// This client:
+// - uses a single http.Client for pooling
+// - respects timeouts
+// - sets up robots.txt cache
+// - sets concurrency limits
+// - initializes the composite cache (memory/file/redis)
+func New(cfg *config.Config, logger log.Logger, unified cache.Cache) *Client {
 	timeout := cfg.RequestTimeout
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -54,67 +65,81 @@ func New(cfg *config.Config, logger log.Logger) *Client {
 		http:    httpClient,
 		robots:  newRobotsCache(),
 		limiter: newHostLimiter(cfg.MaxConcurrentHosts, cfg.MaxRequestsPerHost),
-		cache:   newMemoryCache(cfg.CacheTTL, cfg.MaxCacheEntries),
+		cache:   unified, // unified composite cache
 	}
 }
 
-// Fetch performs a robots.txt-compliant HTTP GET with retries,
-// concurrency limiting and basic caching.
+// Fetch performs a robots.txt compliant HTTP GET with:
+// - concurrency limiting
+// - composite caching
+// - retry logic
+// - transparent User-Agent injection
 //
-// headers may contain additional headers to send. The User-Agent header
-// will always be set to the configured Aether User-Agent, overriding any
-// User-Agent value in headers.
+// headers: optional additional request headers.
 func (c *Client) Fetch(
 	ctx context.Context,
 	rawURL string,
 	headers http.Header,
 ) (*Response, error) {
+
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, errors.New(errors.KindHTTP, "invalid URL", err)
 	}
 	hostKey := parsed.Host
 
-	// Concurrency limiting.
+	// Global + per-host concurrency limiting.
 	if err := c.limiter.Acquire(ctx, hostKey); err != nil {
 		return nil, errors.New(errors.KindHTTP, "acquiring concurrency slot failed", err)
 	}
 	defer c.limiter.Release(hostKey)
 
-	// robots.txt check.
+	// Robots.txt check (fail-closed for errors, allow for fetch failures).
 	allowed, err := c.robots.allowed(ctx, rawURL, c.cfg.UserAgent, c.http)
 	if err != nil {
-		// conservative: treat failure as an HTTP error.
 		return nil, err
 	}
 	if !allowed {
 		return nil, errors.New(errors.KindRobots, "access disallowed by robots.txt", nil)
 	}
 
-	// Cache check.
-	if resp := c.cache.Get(rawURL); resp != nil {
-		c.logger.Debugf("cache hit for %s", rawURL)
-		return resp, nil
+	// ---- Composite Cache Check (memory → file → redis)
+	cacheKey := "http:" + rawURL
+
+	if c.cache != nil {
+		if cached, ok := c.cache.Get(cacheKey); ok {
+			c.logger.Debugf("cache hit (composite) for %s", rawURL)
+
+			return &Response{
+				URL:        rawURL,
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"X-Aether-Cache": []string{"HIT"}},
+				Body:       cached,
+				FetchedAt:  time.Now(),
+			}, nil
+		}
 	}
 
-	// Build base request (without context; context is applied per attempt).
+	// ---- Build headers for request
 	reqHeaders := make(http.Header)
 	for k, v := range headers {
 		cp := make([]string, len(v))
 		copy(cp, v)
 		reqHeaders[k] = cp
 	}
-	// Ensure User-Agent is set to Aether's configured value.
 	reqHeaders.Set("User-Agent", c.cfg.UserAgent)
 	if reqHeaders.Get("Accept") == "" {
 		reqHeaders.Set("Accept", "*/*")
 	}
 
+	// ---- Retry Logic
 	const maxRetries = 2
 	backoff := 200 * time.Millisecond
-
 	var lastErr error
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+
+		// ctx cancellation short-circuit
 		select {
 		case <-ctx.Done():
 			return nil, errors.New(errors.KindHTTP, "request canceled", ctx.Err())
@@ -158,22 +183,21 @@ func (c *Client) Fetch(
 			FetchedAt:  time.Now(),
 		}
 
-		// Cache successful 200 responses.
-		if resp.StatusCode == http.StatusOK {
-			c.cache.Set(rawURL, out)
+		// ---- Store in unified cache (only cache 200 OK)
+		if resp.StatusCode == http.StatusOK && c.cache != nil {
+			c.cache.Set(cacheKey, body, c.cfg.CacheTTL)
 		}
 
 		return out, nil
 	}
 
-	// Fallback in case the loop exits without returning.
 	if lastErr != nil {
 		return nil, errors.New(errors.KindHTTP, "request failed after retries", lastErr)
 	}
 	return nil, errors.New(errors.KindHTTP, "request failed for unknown reasons", nil)
 }
 
-// isRetryableError reports whether the error is likely transient.
+// isRetryableError reports whether the error is transient.
 func isRetryableError(err error) bool {
 	if ne, ok := err.(net.Error); ok {
 		return ne.Timeout() || ne.Temporary()

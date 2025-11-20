@@ -2,19 +2,20 @@
 //
 // Package aether provides the public entrypoint for the Aether library.
 // Aether is a legal, robots.txt-compliant web retrieval toolkit that
-// normalizes public, open data into a JSON-compatible model and can
-// serialize it to both JSON and TOON formats for LLM usage.
+// normalizes public, open data into JSON- and TOON-compatible models.
 //
-// Stage 1: This file defines the root Client, configuration options,
-// and a version helper.
-// Stage 2: The Client now owns an internal HTTP fetcher that implements
-// robots.txt-compliant HTTP GET with concurrency limits and caching.
+// Stage 3:
+// The Client now owns a unified composite cache (memory, file, redis),
+// and an internal HTTP fetcher that uses that cache together with a
+// robots.txt-compliant request pipeline.
+
 package aether
 
 import (
 	"fmt"
 	"time"
 
+	icache "github.com/Nibir1/Aether/internal/cache"
 	"github.com/Nibir1/Aether/internal/config"
 	hclient "github.com/Nibir1/Aether/internal/httpclient"
 	"github.com/Nibir1/Aether/internal/log"
@@ -22,50 +23,60 @@ import (
 )
 
 // DefaultUserAgent is the default HTTP User-Agent string that Aether uses
-// when making outbound HTTP requests.
-//
-// The string clearly identifies the library and repository, which is an
-// important part of responsible, transparent web access.
+// for outbound requests. It identifies the library responsibly.
 const DefaultUserAgent = "AetherBot/1.0 (+https://github.com/Nibir1/Aether)"
 
-// Client is the main public handle for using Aether.
+// Client is the main public interface for using Aether.
 //
-// All high-level capabilities such as Search, Lookup, Batch and Crawl
-// will be implemented as methods on Client in later stages. As of Stage 2,
-// Client also encapsulates an internal HTTP fetcher.
+// Stage 3:
+// - owns unified cache (memory + file + redis)
+// - owns internal HTTP fetcher
+// - will own parsers, search pipeline, TOON/JSON normalizers in later stages
 type Client struct {
 	cfg     *config.Config
 	logger  log.Logger
 	fetcher *hclient.Client
+	cache   icache.Cache
 }
 
-// Config is the public view of Aether configuration.
+// Config is the public, inspectable view of Aether configuration.
 //
-// This type mirrors the internal config.Config fields that we want to
-// expose. Keeping it separate from the internal type allows us to evolve
-// implementation details without breaking user code.
+// This mirrors internal config.Config, but exposes only fields intended for
+// public visibility and does not reveal internal implementation details.
 type Config struct {
+	// Networking
 	UserAgent          string
 	RequestTimeout     time.Duration
 	MaxConcurrentHosts int
 	MaxRequestsPerHost int
+
+	// Logging
 	EnableDebugLogging bool
+
+	// Caching
+	EnableMemoryCache bool
+	EnableFileCache   bool
+	EnableRedisCache  bool
+
+	CacheDirectory string
+	RedisAddress   string
+
+	CacheTTL        time.Duration
+	MaxCacheEntries int
 }
 
-// Option is a functional option used to customize the Client.
-//
-// This pattern keeps the constructor flexible and backward compatible
-// as Aether grows new configuration settings.
+// Option is a functional option that modifies the internal configuration.
 type Option func(*config.Config)
 
 // NewClient constructs a new Aether Client with optional configuration.
 //
-// It starts from the internal default configuration, applies all
-// provided Option functions, ensures a reasonable User-Agent string is
-// set, initializes a logger and constructs an internal HTTP fetcher.
-//
-// At Stage 2, the Client can perform robots.txt-compliant HTTP GET
-// requests via the Fetch method.
+// Steps:
+// 1. Load internal defaults.
+// 2. Apply functional options.
+// 3. Ensure a User-Agent is set.
+// 4. Initialize logger.
+// 5. Initialize composite cache.
+// 6. Initialize internal HTTP fetcher (robots + cache + concurrency).
 func NewClient(opts ...Option) (*Client, error) {
 	internalCfg := config.Default()
 
@@ -75,26 +86,28 @@ func NewClient(opts ...Option) (*Client, error) {
 		}
 	}
 
-	// Ensure a transparent, well-formed User-Agent is always present.
+	// Default User-Agent if none provided.
 	if internalCfg.UserAgent == "" {
 		internalCfg.UserAgent = DefaultUserAgent
 	}
 
 	logger := log.New(internalCfg.EnableDebugLogging)
-	fetcher := hclient.New(internalCfg, logger)
 
-	return &Client{
-		cfg:     internalCfg,
-		logger:  logger,
-		fetcher: fetcher,
-	}, nil
+	cli := &Client{
+		cfg:    internalCfg,
+		logger: logger,
+	}
+
+	// Build unified composite cache (memory + file + redis).
+	cli.initCache()
+
+	// Build HTTP fetcher with unified cache.
+	cli.fetcher = hclient.New(internalCfg, logger, cli.cache)
+
+	return cli, nil
 }
 
-// WithUserAgent overrides the default User-Agent string.
-//
-// This allows applications to identify themselves more specifically,
-// while still respecting Aether's legal/ethical responsibility to be
-// transparent about the client identity when accessing public sites.
+// WithUserAgent overrides the HTTP User-Agent Aether will send.
 func WithUserAgent(ua string) Option {
 	return func(c *config.Config) {
 		if ua != "" {
@@ -103,12 +116,7 @@ func WithUserAgent(ua string) Option {
 	}
 }
 
-// WithRequestTimeout sets the HTTP request timeout used by Aether's
-// network operations.
-//
-// Very short timeouts may cause frequent failures; very long timeouts
-// may delay recovery from issues. Sensible values are typically in the
-// 5–60 second range, depending on the application.
+// WithRequestTimeout sets the timeout for HTTP GET operations.
 func WithRequestTimeout(d time.Duration) Option {
 	return func(c *config.Config) {
 		if d > 0 {
@@ -117,13 +125,7 @@ func WithRequestTimeout(d time.Duration) Option {
 	}
 }
 
-// WithConcurrency configures basic concurrency limits for Aether's
-// outbound HTTP operations.
-//
-// maxHosts controls how many distinct hosts Aether may contact
-// concurrently, and maxPerHost sets a soft limit on how many requests
-// can be in flight for a single host. These limits help ensure polite,
-// robots.txt-compliant traffic patterns.
+// WithConcurrency configures concurrency limits for outbound network I/O.
 func WithConcurrency(maxHosts, maxPerHost int) Option {
 	return func(c *config.Config) {
 		if maxHosts > 0 {
@@ -135,39 +137,43 @@ func WithConcurrency(maxHosts, maxPerHost int) Option {
 	}
 }
 
-// WithDebugLogging enables or disables verbose internal logging.
-//
-// Debug logs are extremely useful while integrating or developing with
-// Aether, but may be too noisy for production environments.
+// WithDebugLogging enables verbose internal logging.
 func WithDebugLogging(enabled bool) Option {
 	return func(c *config.Config) {
 		c.EnableDebugLogging = enabled
 	}
 }
 
-// Version returns a human-readable Aether version string.
-//
-// The underlying semantic version is maintained in an internal package,
-// which allows the public API to present it in a stable way.
+// Version returns the Aether version as a string.
 func Version() string {
 	return fmt.Sprintf("Aether %s", version.AetherVersion)
 }
 
-// EffectiveConfig returns a copy of the current configuration as a
-// public Config value.
-//
-// Callers can inspect this to understand which defaults and options
-// are in effect for a given Client instance.
+// EffectiveConfig returns the final public configuration in effect.
 func (c *Client) EffectiveConfig() Config {
 	if c == nil || c.cfg == nil {
 		return Config{}
 	}
 
 	return Config{
+		// Networking
 		UserAgent:          c.cfg.UserAgent,
 		RequestTimeout:     c.cfg.RequestTimeout,
 		MaxConcurrentHosts: c.cfg.MaxConcurrentHosts,
 		MaxRequestsPerHost: c.cfg.MaxRequestsPerHost,
+
+		// Logging
 		EnableDebugLogging: c.cfg.EnableDebugLogging,
+
+		// Caching
+		EnableMemoryCache: c.cfg.EnableMemoryCache,
+		EnableFileCache:   c.cfg.EnableFileCache,
+		EnableRedisCache:  c.cfg.EnableRedisCache,
+
+		CacheDirectory: c.cfg.CacheDirectory,
+		RedisAddress:   c.cfg.RedisAddress,
+
+		CacheTTL:        c.cfg.CacheTTL,
+		MaxCacheEntries: c.cfg.MaxCacheEntries,
 	}
 }
