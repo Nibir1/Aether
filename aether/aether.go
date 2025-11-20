@@ -4,7 +4,7 @@
 // Aether is a legal, robots.txt-compliant web retrieval toolkit that
 // normalizes public, open data into JSON- and TOON-compatible models.
 //
-// As of Stage 10, Aether includes:
+// As of Stage 13, Aether includes:
 //   - unified composite caching (memory, file, redis)
 //   - robots.txt-compliant HTTP fetcher
 //   - HTML parsing + article extraction
@@ -13,6 +13,7 @@
 //   - RSS/Atom subsystem
 //   - OpenAPI integrations (Wikipedia, Wikidata, HN, GitHub, GovPress,
 //     WhiteHouse, Weather via MET Norway)
+//   - Public plugin system (SourcePlugins, TransformPlugins, DisplayPlugins)
 
 package aether
 
@@ -26,6 +27,8 @@ import (
 	"github.com/Nibir1/Aether/internal/log"
 	iopenapi "github.com/Nibir1/Aether/internal/openapi"
 	"github.com/Nibir1/Aether/internal/version"
+
+	"github.com/Nibir1/Aether/plugins"
 )
 
 // DefaultUserAgent is the default HTTP User-Agent string that Aether uses
@@ -35,26 +38,27 @@ const DefaultUserAgent = "AetherBot/1.0 (+https://github.com/Nibir1/Aether)"
 // Client is the main public interface for using Aether.
 //
 // The Client owns:
-//   - internal unified cache (memory + file + redis)
-//   - internal robots.txt-compliant HTTP fetcher
-//   - internal OpenAPI aggregation client
+//   - unified composite cache
+//   - robots.txt-compliant HTTP fetcher
+//   - internal OpenAPI client
+//   - public plugin registry
 //
-// In later stages it will also expose:
-//   - TOON/JSON serialization
-//   - full multi-source query federation
-//   - Crawl, Batch, Normalize, Display subsystems
+// Future stages extend Client with:
+//   - full Aether.Search federation
+//   - Crawl, Batch
+//   - Normalize (JSON+TOON)
+//   - Display system (Markdown, tables, themes)
 type Client struct {
 	cfg     *config.Config
 	logger  log.Logger
 	fetcher *hclient.Client
 	cache   icache.Cache
 	openapi *iopenapi.Client
+
+	plugins *plugins.Registry // internal plugin registry
 }
 
 // Config is the public, inspectable view of effective Aether configuration.
-//
-// This is intentionally separate from internal config.Config to ensure internal
-// changes do not break the public API surface.
 type Config struct {
 	// Networking
 	UserAgent          string
@@ -78,21 +82,19 @@ type Config struct {
 }
 
 // Option is a functional option that modifies the internal configuration.
-//
-// Aether uses this pattern to keep NewClient future-proof as the library gains
-// new capabilities and settings.
 type Option func(*config.Config)
 
 // NewClient constructs a new Aether Client with optional configuration.
 //
 // Pipeline:
 //  1. Load default internal config
-//  2. Apply user-specified Option values
-//  3. Ensure a User-Agent is set
+//  2. Apply user-specified Option functions
+//  3. Ensure User-Agent is set
 //  4. Initialize logger
 //  5. Initialize unified composite cache
-//  6. Initialize HTTP fetcher with robots.txt and cache support
-//  7. Initialize internal OpenAPI client (Wikipedia, HN, GitHub, GovPress…)
+//  6. Initialize HTTP fetcher (robots.txt + caching)
+//  7. Initialize internal OpenAPI client
+//  8. Initialize plugin registry
 func NewClient(opts ...Option) (*Client, error) {
 	internalCfg := config.Default()
 
@@ -102,7 +104,7 @@ func NewClient(opts ...Option) (*Client, error) {
 		}
 	}
 
-	// Default UA if caller did not specify one.
+	// Default UA if caller did not provide one.
 	if internalCfg.UserAgent == "" {
 		internalCfg.UserAgent = DefaultUserAgent
 	}
@@ -110,17 +112,18 @@ func NewClient(opts ...Option) (*Client, error) {
 	logger := log.New(internalCfg.EnableDebugLogging)
 
 	cli := &Client{
-		cfg:    internalCfg,
-		logger: logger,
+		cfg:     internalCfg,
+		logger:  logger,
+		plugins: plugins.NewRegistry(),
 	}
 
 	// (5) unified composite cache
 	cli.initCache()
 
-	// (6) robots.txt-compliant HTTP fetcher wired to composite cache
+	// (6) robots.txt-compliant HTTP fetcher
 	cli.fetcher = hclient.New(internalCfg, logger, cli.cache)
 
-	// (7) OpenAPI client (no API keys; all public sources)
+	// (7) OpenAPI client
 	cli.openapi = iopenapi.New(internalCfg, logger, cli.fetcher)
 
 	return cli, nil
@@ -141,7 +144,7 @@ func WithUserAgent(ua string) Option {
 	}
 }
 
-// WithRequestTimeout sets the maximum duration Aether will wait on HTTP GET.
+// WithRequestTimeout sets the HTTP timeout duration.
 func WithRequestTimeout(d time.Duration) Option {
 	return func(c *config.Config) {
 		if d > 0 {
@@ -150,7 +153,7 @@ func WithRequestTimeout(d time.Duration) Option {
 	}
 }
 
-// WithConcurrency sets concurrency caps for outbound HTTP I/O.
+// WithConcurrency sets concurrency caps for outbound HTTP requests.
 func WithConcurrency(maxHosts, maxPerHost int) Option {
 	return func(c *config.Config) {
 		if maxHosts > 0 {
@@ -163,7 +166,6 @@ func WithConcurrency(maxHosts, maxPerHost int) Option {
 }
 
 // WithDebugLogging enables verbose internal logs.
-// Useful for debugging; disabled by default in production.
 func WithDebugLogging(enabled bool) Option {
 	return func(c *config.Config) {
 		c.EnableDebugLogging = enabled
@@ -181,32 +183,25 @@ func Version() string {
 	return fmt.Sprintf("Aether %s", version.AetherVersion)
 }
 
-// EffectiveConfig returns the final public configuration in effect for the client.
-//
-// Does not expose internal-only config fields.
+// EffectiveConfig returns the final public configuration in effect.
 func (c *Client) EffectiveConfig() Config {
 	if c == nil || c.cfg == nil {
 		return Config{}
 	}
 
 	return Config{
-		// Networking
 		UserAgent:          c.cfg.UserAgent,
 		RequestTimeout:     c.cfg.RequestTimeout,
 		MaxConcurrentHosts: c.cfg.MaxConcurrentHosts,
 		MaxRequestsPerHost: c.cfg.MaxRequestsPerHost,
-
-		// Logging
 		EnableDebugLogging: c.cfg.EnableDebugLogging,
 
-		// Caching
 		EnableMemoryCache: c.cfg.EnableMemoryCache,
 		EnableFileCache:   c.cfg.EnableFileCache,
 		EnableRedisCache:  c.cfg.EnableRedisCache,
 
-		CacheDirectory: c.cfg.CacheDirectory,
-		RedisAddress:   c.cfg.RedisAddress,
-
+		CacheDirectory:  c.cfg.CacheDirectory,
+		RedisAddress:    c.cfg.RedisAddress,
 		CacheTTL:        c.cfg.CacheTTL,
 		MaxCacheEntries: c.cfg.MaxCacheEntries,
 	}

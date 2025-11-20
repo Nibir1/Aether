@@ -1,34 +1,64 @@
 // aether/search.go
 //
-// This file implements Aether.Search — the high-level retrieval pipeline.
-// At Stage 9, Search primarily orchestrates URL-based retrieval using
-// previously implemented subsystems:
+// High-level search pipeline for Aether.
 //
-//   - SmartQuery (intent and routing)
-//   - Fetch (robots.txt-compliant HTTP)
-//   - Detect (content type / HTML vs JSON vs RSS, etc.)
-//   - ParseHTML (structural HTML parsing)
-//   - ExtractArticleFromHTML (Readability-style article extraction)
-//   - ParseRSS (RSS/Atom feed parsing)
+// Aether.Search is the primary entrypoint for turning an arbitrary user
+// query into a structured SearchResult that can then be normalized into
+// JSON or TOON and rendered for LLM consumption.
 //
-// For non-URL queries, Search currently focuses on classification and
-// routing (via SmartQuery) without executing multi-source network calls.
-// Later stages will extend Search to consult multiple open APIs and
-// legal search sources for free-form queries.
+// Responsibilities:
+//   • Classify query (URL vs free-text lookup)
+//   • Route to SourcePlugins where available
+//   • Fallback to built-in OpenAPI integrations (e.g. Wikipedia)
+//   • Perform direct HTTP fetch for URL queries
+//   • Produce a SearchResult with a PrimaryDocument, optional Article/Feed,
+//     and a SearchPlan describing what was done.
+//
+// NOTE:
+// This is the first full implementation of the search pipeline. Future
+// stages may extend it with:
+//   • richer SmartQuery intent detection
+//   • multi-source federation and merging
+//   • deeper RSS/article handling
+//   • plugin transform pipelines.
 
 package aether
 
 import (
 	"context"
-	"strconv"
+	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 
-	idetect "github.com/Nibir1/Aether/internal/detect"
-	irss "github.com/Nibir1/Aether/internal/rss"
+	"github.com/Nibir1/Aether/plugins"
 )
 
-// SearchDocumentKind describes the kind of document Aether returns
-// as a primary result for a Search call.
+//
+// ────────────────────────────────────────────────
+//                  SEARCH TYPES
+// ────────────────────────────────────────────────
+//
+
+// SearchIntent describes the broad category of a query.
+type SearchIntent string
+
+const (
+	SearchIntentUnknown SearchIntent = "unknown"
+	SearchIntentURL     SearchIntent = "url"
+	SearchIntentLookup  SearchIntent = "lookup"
+	SearchIntentPlugin  SearchIntent = "plugin"
+)
+
+// SearchPlan describes how Aether decided to handle a query.
+type SearchPlan struct {
+	RawQuery string       // original user query
+	Intent   SearchIntent // URL vs lookup vs plugin-driven
+	URL      string       // populated for URL-based queries
+	Source   string       // plugin or integration that provided primary result
+}
+
+// SearchDocumentKind describes the kind of the primary document.
 type SearchDocumentKind string
 
 const (
@@ -41,379 +71,359 @@ const (
 	SearchDocumentKindBinary  SearchDocumentKind = "binary"
 )
 
-// SearchDocument is a normalized representation of a single primary
-// piece of content discovered during Search.
+// SearchDocument is the primary, high-level document for a search.
 //
-// It is intentionally LLM-friendly and captures enough context for
-// downstream reasoning and TOON/JSON modeling.
+// It intentionally mirrors Aether's normalized model at a higher level,
+// and is later converted into model.Document by NormalizeSearchResult.
 type SearchDocument struct {
-	URL      string
-	Kind     SearchDocumentKind
-	Title    string
-	Content  string // main text content
-	HTML     string // sanitized HTML fragment where applicable
-	Excerpt  string
-	Source   string            // e.g. "url:article", "url:rss", "url:html", "url:json"
-	Metadata map[string]string // arbitrary key/value metadata, if available
+	URL      string             // canonical URL, if any
+	Kind     SearchDocumentKind // article, html_page, feed, json, text, binary
+	Title    string             // human-readable title
+	Excerpt  string             // short summary or snippet
+	Content  string             // main textual body
+	Metadata map[string]string  // flat key/value metadata
 }
 
-// SearchResult is the top-level output of Aether.Search.
+// SearchResult is the main output of Aether.Search.
 //
-// At Stage 9, SearchResult focuses on URL-oriented retrieval. For
-// non-URL queries, it still returns the SmartQueryPlan and routing
-// information but may not yet contain network-derived documents.
+// It contains:
+//   - the original query
+//   - the plan describing what was done
+//   - the primary document (SearchDocument)
+//   - optional richer views (Article, Feed) populated by other subsystems
 type SearchResult struct {
 	Query           string
-	Plan            SmartQueryPlan
+	Plan            SearchPlan
 	PrimaryDocument *SearchDocument
 
-	// Optional richer views, when applicable:
-	Article *Article // when Kind == article
-	Feed    *Feed    // when Kind == feed
-
-	// Notes contains human-readable explanations of decisions made
-	// by the Search pipeline. These are useful for debugging and
-	// introspection.
-	Notes []string
+	// Optional views that may be populated by other subsystems:
+	Article *Article // from ExtractText / readability engine (Stage 5)
+	Feed    *Feed    // from RSS subsystem (Stage 8)
 }
 
-// Search analyzes the query using SmartQuery and, when appropriate,
-// performs a robots.txt-compliant retrieval of a single URL, passing
-// the response through Aether's detection, parsing, extraction and
-// normalization layers.
 //
-// Behavior at Stage 9:
-//   - If the query is a single URL, Search will fetch and analyze it.
-//   - For non-URL queries, Search returns a routing plan and notes
-//     but does not yet perform multi-source network retrieval.
-func (c *Client) Search(ctx context.Context, query string) (*SearchResult, error) {
-	plan := c.SmartQuery(query)
+// ────────────────────────────────────────────────
+//                    ENTRYPOINT
+// ────────────────────────────────────────────────
+//
 
-	result := &SearchResult{
-		Query:           plan.Query,
-		Plan:            *plan,
-		PrimaryDocument: nil,
+// Search runs Aether's high-level search pipeline for the given query.
+//
+// Behavior:
+//   - URL queries → robots.txt-compliant fetch → SearchDocument
+//   - Non-URL queries:
+//   - Try SourcePlugins (in registration order)
+//   - Fallback to Wikipedia summary via internal OpenAPI client
+//
+// TODO (future stages): expand SmartQuery classification, integrate RSS
+// auto-detection, transform plugins, and richer federation.
+func (c *Client) Search(ctx context.Context, query string) (*SearchResult, error) {
+	if c == nil {
+		return nil, fmt.Errorf("aether: nil client in Search")
+	}
+
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("aether: empty query")
+	}
+
+	plan := SearchPlan{
+		RawQuery: query,
+		Intent:   SearchIntentUnknown,
+	}
+
+	if isProbablyURL(query) {
+		plan.Intent = SearchIntentURL
+		plan.URL = query
+
+		doc, err := c.searchURL(ctx, plan)
+		if err != nil {
+			return nil, err
+		}
+
+		return &SearchResult{
+			Query:           query,
+			Plan:            plan,
+			PrimaryDocument: doc,
+			Article:         nil,
+			Feed:            nil,
+		}, nil
+	}
+
+	// non-URL → treat as lookup / textual query
+	plan.Intent = SearchIntentLookup
+
+	// 1) Try SourcePlugins first (plugin-based integrations).
+	if c.plugins != nil {
+		if doc, sourceName, err := c.searchViaPlugins(ctx, query); err == nil && doc != nil {
+			plan.Intent = SearchIntentPlugin
+			plan.Source = sourceName
+
+			return &SearchResult{
+				Query:           query,
+				Plan:            plan,
+				PrimaryDocument: doc,
+				Article:         nil,
+				Feed:            nil,
+			}, nil
+		}
+	}
+
+	// 2) Fallback to Wikipedia summary for factual queries.
+	doc, err := c.searchViaWikipedia(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	plan.Source = "wikipedia"
+
+	return &SearchResult{
+		Query:           query,
+		Plan:            plan,
+		PrimaryDocument: doc,
 		Article:         nil,
 		Feed:            nil,
-		Notes:           nil,
-	}
-
-	// If the SmartQuery plan indicates the query is a single URL,
-	// perform URL-based retrieval.
-	if plan.HasURL && len(strings.Fields(plan.Query)) == 1 {
-		url := strings.TrimSpace(plan.Query)
-		result.Notes = append(result.Notes, "Detected single-URL query; performing URL-based retrieval pipeline.")
-		if err := c.searchFromURL(ctx, url, result); err != nil {
-			return result, err
-		}
-		return result, nil
-	}
-
-	// No URL detected: at Stage 9, we only return routing info.
-	result.Notes = append(result.Notes,
-		"No direct URL detected in query; returning SmartQuery routing plan only.",
-		"Future stages will execute multi-source retrieval (lookup, RSS, OpenAPIs) for this query.",
-	)
-
-	return result, nil
+	}, nil
 }
 
-// searchFromURL executes the full URL-based pipeline:
 //
-//	Fetch → Detect → (HTML/Article | RSS | JSON | Text | Binary).
-func (c *Client) searchFromURL(ctx context.Context, url string, res *SearchResult) error {
-	// Step 1: robots.txt-compliant fetch
-	fetchRes, err := c.Fetch(ctx, url)
+// ────────────────────────────────────────────────
+//                 URL-BASED SEARCH
+// ────────────────────────────────────────────────
+//
+
+func (c *Client) searchURL(ctx context.Context, plan SearchPlan) (*SearchDocument, error) {
+	body, headers, err := c.FetchRaw(ctx, plan.URL)
 	if err != nil {
-		res.Notes = append(res.Notes, "Fetch failed for URL.")
-		return err
+		return nil, err
 	}
 
-	// Step 2: content-type detection (MIME + sniffing).
-	d := idetect.Detect(fetchRes.Body, fetchRes.Header)
-	res.Notes = append(res.Notes, "Content detection completed for fetched URL.")
+	contentType := classifyContentType(headers)
+	textBody := string(body)
 
-	switch d.RawType {
-	case idetect.TypeHTML:
-		return c.handleHTMLURL(url, fetchRes.Body, d, res)
-	case idetect.TypeRSS, idetect.TypeXML:
-		// Try to treat as feed first.
-		return c.handleFeedURL(url, fetchRes.Body, res)
-	case idetect.TypeJSON:
-		return c.handleJSONURL(url, fetchRes.Body, res)
-	case idetect.TypeText:
-		return c.handleTextURL(url, fetchRes.Body, res)
-	case idetect.TypeImage, idetect.TypePDF, idetect.TypeBinary:
-		return c.handleBinaryURL(url, d.RawType, res)
+	kind := SearchDocumentKindUnknown
+	switch {
+	case strings.Contains(contentType, "html"):
+		kind = SearchDocumentKindHTML
+	case strings.Contains(contentType, "json"):
+		kind = SearchDocumentKindJSON
+	case strings.HasPrefix(contentType, "text/"):
+		kind = SearchDocumentKindText
 	default:
-		// Unknown type: treat as binary.
-		return c.handleBinaryURL(url, idetect.TypeUnknown, res)
+		kind = SearchDocumentKindBinary
 	}
+
+	metadata := map[string]string{
+		"content_type": contentType,
+		"source":       "direct_fetch",
+	}
+
+	excerpt := buildExcerpt(textBody, 320)
+
+	return &SearchDocument{
+		URL:      plan.URL,
+		Kind:     kind,
+		Title:    "", // Article extractor / metadata subsystem may fill this later.
+		Excerpt:  excerpt,
+		Content:  textBody,
+		Metadata: metadata,
+	}, nil
 }
 
-// handleHTMLURL processes an HTML response: it may run article extraction
-// or fall back to structural HTML parsing.
-func (c *Client) handleHTMLURL(
-	url string,
-	body []byte,
-	detectRes *idetect.Result,
-	res *SearchResult,
-) error {
-	// Parse HTML to provide metadata as a fallback if article extraction fails.
-	parsed, parsedErr := c.ParseHTML(body)
+//
+// ────────────────────────────────────────────────
+//                 PLUGIN-BASED SEARCH
+// ────────────────────────────────────────────────
+//
 
-	// Prefer article extraction if the page appears article-like or
-	// if subtype is unknown (we can still attempt Readability).
-	if detectRes.SubType == idetect.TypeArticle || detectRes.SubType == idetect.TypeUnknown {
-		article, err := c.ExtractArticleFromHTML(body, url)
-		if err == nil && article != nil && strings.TrimSpace(article.Content) != "" {
-			res.Article = article
-			doc := &SearchDocument{
-				URL:      url,
-				Kind:     SearchDocumentKindArticle,
-				Title:    article.Title,
-				Content:  article.Content,
-				HTML:     article.HTML,
-				Excerpt:  article.Excerpt,
-				Source:   "url:article",
-				Metadata: article.Meta,
-			}
-			if doc.Metadata == nil {
-				doc.Metadata = make(map[string]string)
-			}
-			// Ensure URL and title also appear in metadata.
-			doc.Metadata["url"] = url
-			if doc.Title != "" {
-				doc.Metadata["title"] = doc.Title
-			}
-			res.PrimaryDocument = doc
-			res.Notes = append(res.Notes, "HTML classified as article; Readability-style extraction succeeded.")
-			return nil
-		}
-		res.Notes = append(res.Notes, "Article extraction either failed or produced empty content; falling back to structural HTML view.")
+// searchViaPlugins attempts to satisfy the query using registered SourcePlugins.
+// It returns the first successful SearchDocument produced by any plugin.
+func (c *Client) searchViaPlugins(ctx context.Context, query string) (*SearchDocument, string, error) {
+	if c.plugins == nil {
+		return nil, "", fmt.Errorf("no plugin registry available")
 	}
 
-	// Fallback: use structural HTML representation (headings/paragraphs).
-	if parsedErr == nil && parsed != nil {
-		// Build a synthetic content body from paragraphs.
-		var contentBuilder strings.Builder
-		for _, p := range parsed.Paragraphs {
-			if strings.TrimSpace(p.Text) == "" {
-				continue
-			}
-			if contentBuilder.Len() > 0 {
-				contentBuilder.WriteString("\n\n")
-			}
-			contentBuilder.WriteString(p.Text)
-		}
-		content := strings.TrimSpace(contentBuilder.String())
-
-		// Excerpt: use first paragraph or first 240 chars.
-		excerpt := ""
-		if len(parsed.Paragraphs) > 0 {
-			excerpt = parsed.Paragraphs[0].Text
-		}
-		if len([]rune(excerpt)) > 240 {
-			r := []rune(excerpt)
-			excerpt = string(r[:240]) + "…"
+	names := c.plugins.ListSources()
+	for _, name := range names {
+		p := c.plugins.GetSource(name)
+		if p == nil {
+			continue
 		}
 
-		doc := &SearchDocument{
-			URL:      url,
-			Kind:     SearchDocumentKindHTML,
-			Title:    parsed.Title,
-			Content:  content,
-			HTML:     "", // we intentionally do not expose a full HTML fragment here
-			Excerpt:  excerpt,
-			Source:   "url:html",
-			Metadata: parsed.Meta,
-		}
-		if doc.Metadata == nil {
-			doc.Metadata = make(map[string]string)
-		}
-		doc.Metadata["url"] = url
-		if doc.Title != "" {
-			doc.Metadata["title"] = doc.Title
+		doc, err := p.Fetch(ctx, query)
+		if err != nil || doc == nil {
+			continue
 		}
 
-		res.PrimaryDocument = doc
-		res.Notes = append(res.Notes, "HTML processed as general page; using headings/paragraphs view.")
+		sd := searchDocumentFromPluginDocument(doc)
+		if sd == nil {
+			continue
+		}
+
+		// Attach plugin name into metadata
+		if sd.Metadata == nil {
+			sd.Metadata = map[string]string{}
+		}
+		sd.Metadata["aether.source_plugin"] = name
+
+		return sd, name, nil
+	}
+
+	return nil, "", fmt.Errorf("no source plugin produced a result")
+}
+
+// searchDocumentFromPluginDocument converts a plugins.Document into a
+// SearchDocument suitable for Aether's SearchResult.
+func searchDocumentFromPluginDocument(doc *plugins.Document) *SearchDocument {
+	if doc == nil {
 		return nil
 	}
 
-	// If parsing failed entirely, treat as binary/text fallback.
-	res.Notes = append(res.Notes, "HTML parsing failed; treating content as binary.")
-	return c.handleBinaryURL(url, idetect.TypeHTML, res)
+	kind := SearchDocumentKindUnknown
+	switch doc.Kind {
+	case plugins.DocumentKindArticle:
+		kind = SearchDocumentKindArticle
+	case plugins.DocumentKindHTML:
+		kind = SearchDocumentKindHTML
+	case plugins.DocumentKindFeed:
+		kind = SearchDocumentKindFeed
+	case plugins.DocumentKindJSON:
+		kind = SearchDocumentKindJSON
+	case plugins.DocumentKindText:
+		kind = SearchDocumentKindText
+	case plugins.DocumentKindBinary:
+		kind = SearchDocumentKindBinary
+	default:
+		kind = SearchDocumentKindUnknown
+	}
+
+	meta := map[string]string{}
+	for k, v := range doc.Metadata {
+		meta[k] = v
+	}
+	if doc.Source != "" {
+		meta["aether.plugin_source"] = doc.Source
+	}
+
+	excerpt := doc.Excerpt
+	if strings.TrimSpace(excerpt) == "" {
+		excerpt = buildExcerpt(doc.Content, 320)
+	}
+
+	return &SearchDocument{
+		URL:      doc.URL,
+		Kind:     kind,
+		Title:    doc.Title,
+		Excerpt:  excerpt,
+		Content:  doc.Content,
+		Metadata: meta,
+	}
 }
 
-// handleFeedURL processes an RSS/Atom feed retrieved from a URL.
-func (c *Client) handleFeedURL(
-	url string,
-	body []byte,
-	res *SearchResult,
-) error {
-	// First, ensure it actually looks like a feed.
-	ft := irss.DetectFeedType(body)
-	if ft == irss.FeedUnknown {
-		res.Notes = append(res.Notes, "XML content did not look like RSS/Atom; not treated as feed.")
-		// Fall back to treating as text.
-		return c.handleTextURL(url, body, res)
-	}
-
-	feed, err := c.ParseRSS(body)
-	if err != nil {
-		res.Notes = append(res.Notes, "RSS/Atom parsing failed; falling back to text.")
-		return c.handleTextURL(url, body, res)
-	}
-
-	res.Feed = feed
-
-	// Summarize the feed into a SearchDocument.
-	excerpt := ""
-	if len(feed.Items) > 0 {
-		first := feed.Items[0]
-		if strings.TrimSpace(first.Description) != "" {
-			excerpt = first.Description
-		} else if strings.TrimSpace(first.Content) != "" {
-			excerpt = first.Content
-		} else {
-			excerpt = first.Title
-		}
-		if len([]rune(excerpt)) > 240 {
-			r := []rune(excerpt)
-			excerpt = string(r[:240]) + "…"
-		}
-	}
-
-	doc := &SearchDocument{
-		URL:     url,
-		Kind:    SearchDocumentKindFeed,
-		Title:   feed.Title,
-		Content: "", // feed content is represented primarily via Feed struct
-		HTML:    "",
-		Excerpt: excerpt,
-		Source:  "url:rss",
-		Metadata: map[string]string{
-			"url":         url,
-			"feed_link":   feed.Link,
-			"feed_title":  feed.Title,
-			"feed_items":  intToString(len(feed.Items)),
-			"feed_source": "rss_or_atom",
-		},
-	}
-
-	res.PrimaryDocument = doc
-	res.Notes = append(res.Notes, "Content processed as RSS/Atom feed.")
-	return nil
-}
-
-// handleJSONURL processes a JSON response as a generic JSON document.
 //
-// For now we treat JSON as opaque textual content; later stages may
-// add specific detectors for schema-aware APIs (e.g. OpenAPI sources).
-func (c *Client) handleJSONURL(
-	url string,
-	body []byte,
-	res *SearchResult,
-) error {
-	text := strings.TrimSpace(string(body))
-	// Truncate very long JSON for primary content.
-	runes := []rune(text)
-	if len(runes) > 4000 {
-		text = string(runes[:4000]) + "…"
+// ────────────────────────────────────────────────
+//              WIKIPEDIA FALLBACK SEARCH
+// ────────────────────────────────────────────────
+//
+
+// searchViaWikipedia uses the built-in OpenAPI client to fetch a concise
+// summary of the topic from Wikipedia.
+//
+// This is the default fallback for non-URL queries when no SourcePlugin
+// handled the request.
+func (c *Client) searchViaWikipedia(ctx context.Context, query string) (*SearchDocument, error) {
+	summary, err := c.WikipediaSummary(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("aether: wikipedia lookup failed: %w", err)
+	}
+	if summary == nil {
+		return nil, fmt.Errorf("aether: wikipedia returned no data")
 	}
 
-	doc := &SearchDocument{
-		URL:      url,
-		Kind:     SearchDocumentKindJSON,
-		Title:    "",
-		Content:  text,
-		HTML:     "",
-		Excerpt:  makeExcerptFromText(text),
-		Source:   "url:json",
-		Metadata: map[string]string{"url": url},
-	}
-	res.PrimaryDocument = doc
-	res.Notes = append(res.Notes, "Content processed as JSON document.")
-	return nil
-}
-
-// handleTextURL processes plain-text content.
-func (c *Client) handleTextURL(
-	url string,
-	body []byte,
-	res *SearchResult,
-) error {
-	text := strings.TrimSpace(string(body))
-	runes := []rune(text)
-	if len(runes) > 4000 {
-		text = string(runes[:4000]) + "…"
+	meta := map[string]string{
+		"source":   "wikipedia",
+		"lang":     summary.Language,
+		"page_url": summary.URL,
 	}
 
-	doc := &SearchDocument{
-		URL:      url,
-		Kind:     SearchDocumentKindText,
-		Title:    "",
-		Content:  text,
-		HTML:     "",
-		Excerpt:  makeExcerptFromText(text),
-		Source:   "url:text",
-		Metadata: map[string]string{"url": url},
+	excerpt := summary.Description
+	if strings.TrimSpace(excerpt) == "" {
+		excerpt = buildExcerpt(summary.Extract, 320)
 	}
-	res.PrimaryDocument = doc
-	res.Notes = append(res.Notes, "Content processed as plain text.")
-	return nil
+
+	return &SearchDocument{
+		URL:      summary.URL,
+		Kind:     SearchDocumentKindArticle,
+		Title:    summary.Title,
+		Excerpt:  excerpt,
+		Content:  summary.Extract,
+		Metadata: meta,
+	}, nil
 }
 
-// handleBinaryURL handles binary or unknown content types.
-func (c *Client) handleBinaryURL(
-	url string,
-	rawType idetect.Type,
-	res *SearchResult,
-) error {
-	doc := &SearchDocument{
-		URL:      url,
-		Kind:     SearchDocumentKindBinary,
-		Title:    "",
-		Content:  "",
-		HTML:     "",
-		Excerpt:  "",
-		Source:   "url:binary",
-		Metadata: map[string]string{"url": url, "raw_type": string(rawType)},
+//
+// ────────────────────────────────────────────────
+//                  HELPER FUNCTIONS
+// ────────────────────────────────────────────────
+//
+
+// isProbablyURL performs a lightweight heuristic to decide whether a query
+// looks like a URL (http/https).
+func isProbablyURL(q string) bool {
+	if strings.HasPrefix(q, "http://") || strings.HasPrefix(q, "https://") {
+		u, err := url.Parse(q)
+		return err == nil && u.Scheme != "" && u.Host != ""
 	}
-	res.PrimaryDocument = doc
-	res.Notes = append(res.Notes, "Content treated as binary or unsupported type.")
-	return nil
+	return false
 }
 
-// intToString converts an int to its string representation.
-// A small helper to avoid importing strconv in multiple places.
-func intToString(n int) string {
-	// Simple, dependency-free conversion for small integers.
-	// For correctness, we still use strconv internally.
-	return strconvInt(n)
+// classifyContentType normalizes a Content-Type header into a simple string.
+func classifyContentType(h http.Header) string {
+	if h == nil {
+		return "application/octet-stream"
+	}
+	ct := h.Get("Content-Type")
+	if ct == "" {
+		return "application/octet-stream"
+	}
+	return strings.ToLower(ct)
 }
 
-// strconvInt is a tiny wrapper to keep int→string conversion local.
-func strconvInt(n int) string {
-	return strconv.Itoa(n)
-}
-
-// makeExcerptFromText produces a short excerpt from arbitrary text.
-func makeExcerptFromText(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
+// buildExcerpt produces a short snippet from a longer body.
+func buildExcerpt(body string, maxLen int) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
 		return ""
 	}
-	runes := []rune(text)
-	if len(runes) <= 240 {
-		return text
+
+	// Collapse whitespace and newlines for a single-line excerpt.
+	body = collapseWhitespace(body)
+
+	if len(body) <= maxLen {
+		return body
 	}
-	runes = runes[:240]
-	s := string(runes)
-	lastSpace := strings.LastIndex(s, " ")
-	if lastSpace > 80 {
-		s = s[:lastSpace]
+	if maxLen <= 3 {
+		return body[:maxLen]
 	}
-	return strings.TrimSpace(s) + "…"
+
+	return body[:maxLen-3] + "..."
+}
+
+// collapseWhitespace replaces all sequences of whitespace with a single space.
+func collapseWhitespace(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	space := false
+
+	for _, r := range s {
+		if r == ' ' || r == '\n' || r == '\t' || r == '\r' {
+			if !space {
+				b.WriteRune(' ')
+				space = true
+			}
+		} else {
+			b.WriteRune(r)
+			space = false
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
