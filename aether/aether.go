@@ -4,10 +4,15 @@
 // Aether is a legal, robots.txt-compliant web retrieval toolkit that
 // normalizes public, open data into JSON- and TOON-compatible models.
 //
-// Stage 3:
-// The Client now owns a unified composite cache (memory, file, redis),
-// and an internal HTTP fetcher that uses that cache together with a
-// robots.txt-compliant request pipeline.
+// As of Stage 10, Aether includes:
+//   - unified composite caching (memory, file, redis)
+//   - robots.txt-compliant HTTP fetcher
+//   - HTML parsing + article extraction
+//   - Detect/Meta subsystem
+//   - SmartQuery router
+//   - RSS/Atom subsystem
+//   - OpenAPI integrations (Wikipedia, Wikidata, HN, GitHub, GovPress,
+//     WhiteHouse, Weather via MET Norway)
 
 package aether
 
@@ -19,30 +24,37 @@ import (
 	"github.com/Nibir1/Aether/internal/config"
 	hclient "github.com/Nibir1/Aether/internal/httpclient"
 	"github.com/Nibir1/Aether/internal/log"
+	iopenapi "github.com/Nibir1/Aether/internal/openapi"
 	"github.com/Nibir1/Aether/internal/version"
 )
 
 // DefaultUserAgent is the default HTTP User-Agent string that Aether uses
-// for outbound requests. It identifies the library responsibly.
+// when making outbound requests. It includes the repository for transparency.
 const DefaultUserAgent = "AetherBot/1.0 (+https://github.com/Nibir1/Aether)"
 
 // Client is the main public interface for using Aether.
 //
-// Stage 3:
-// - owns unified cache (memory + file + redis)
-// - owns internal HTTP fetcher
-// - will own parsers, search pipeline, TOON/JSON normalizers in later stages
+// The Client owns:
+//   - internal unified cache (memory + file + redis)
+//   - internal robots.txt-compliant HTTP fetcher
+//   - internal OpenAPI aggregation client
+//
+// In later stages it will also expose:
+//   - TOON/JSON serialization
+//   - full multi-source query federation
+//   - Crawl, Batch, Normalize, Display subsystems
 type Client struct {
 	cfg     *config.Config
 	logger  log.Logger
 	fetcher *hclient.Client
 	cache   icache.Cache
+	openapi *iopenapi.Client
 }
 
-// Config is the public, inspectable view of Aether configuration.
+// Config is the public, inspectable view of effective Aether configuration.
 //
-// This mirrors internal config.Config, but exposes only fields intended for
-// public visibility and does not reveal internal implementation details.
+// This is intentionally separate from internal config.Config to ensure internal
+// changes do not break the public API surface.
 type Config struct {
 	// Networking
 	UserAgent          string
@@ -66,17 +78,21 @@ type Config struct {
 }
 
 // Option is a functional option that modifies the internal configuration.
+//
+// Aether uses this pattern to keep NewClient future-proof as the library gains
+// new capabilities and settings.
 type Option func(*config.Config)
 
 // NewClient constructs a new Aether Client with optional configuration.
 //
-// Steps:
-// 1. Load internal defaults.
-// 2. Apply functional options.
-// 3. Ensure a User-Agent is set.
-// 4. Initialize logger.
-// 5. Initialize composite cache.
-// 6. Initialize internal HTTP fetcher (robots + cache + concurrency).
+// Pipeline:
+//  1. Load default internal config
+//  2. Apply user-specified Option values
+//  3. Ensure a User-Agent is set
+//  4. Initialize logger
+//  5. Initialize unified composite cache
+//  6. Initialize HTTP fetcher with robots.txt and cache support
+//  7. Initialize internal OpenAPI client (Wikipedia, HN, GitHub, GovPress…)
 func NewClient(opts ...Option) (*Client, error) {
 	internalCfg := config.Default()
 
@@ -86,7 +102,7 @@ func NewClient(opts ...Option) (*Client, error) {
 		}
 	}
 
-	// Default User-Agent if none provided.
+	// Default UA if caller did not specify one.
 	if internalCfg.UserAgent == "" {
 		internalCfg.UserAgent = DefaultUserAgent
 	}
@@ -98,16 +114,25 @@ func NewClient(opts ...Option) (*Client, error) {
 		logger: logger,
 	}
 
-	// Build unified composite cache (memory + file + redis).
+	// (5) unified composite cache
 	cli.initCache()
 
-	// Build HTTP fetcher with unified cache.
+	// (6) robots.txt-compliant HTTP fetcher wired to composite cache
 	cli.fetcher = hclient.New(internalCfg, logger, cli.cache)
+
+	// (7) OpenAPI client (no API keys; all public sources)
+	cli.openapi = iopenapi.New(internalCfg, logger, cli.fetcher)
 
 	return cli, nil
 }
 
-// WithUserAgent overrides the HTTP User-Agent Aether will send.
+//
+// ────────────────────────────────────────────────
+//      PUBLIC CONFIGURATION OPTIONS
+// ────────────────────────────────────────────────
+//
+
+// WithUserAgent overrides the default HTTP User-Agent.
 func WithUserAgent(ua string) Option {
 	return func(c *config.Config) {
 		if ua != "" {
@@ -116,7 +141,7 @@ func WithUserAgent(ua string) Option {
 	}
 }
 
-// WithRequestTimeout sets the timeout for HTTP GET operations.
+// WithRequestTimeout sets the maximum duration Aether will wait on HTTP GET.
 func WithRequestTimeout(d time.Duration) Option {
 	return func(c *config.Config) {
 		if d > 0 {
@@ -125,7 +150,7 @@ func WithRequestTimeout(d time.Duration) Option {
 	}
 }
 
-// WithConcurrency configures concurrency limits for outbound network I/O.
+// WithConcurrency sets concurrency caps for outbound HTTP I/O.
 func WithConcurrency(maxHosts, maxPerHost int) Option {
 	return func(c *config.Config) {
 		if maxHosts > 0 {
@@ -137,19 +162,28 @@ func WithConcurrency(maxHosts, maxPerHost int) Option {
 	}
 }
 
-// WithDebugLogging enables verbose internal logging.
+// WithDebugLogging enables verbose internal logs.
+// Useful for debugging; disabled by default in production.
 func WithDebugLogging(enabled bool) Option {
 	return func(c *config.Config) {
 		c.EnableDebugLogging = enabled
 	}
 }
 
-// Version returns the Aether version as a string.
+//
+// ────────────────────────────────────────────────
+//              PUBLIC UTILITIES
+// ────────────────────────────────────────────────
+//
+
+// Version returns the public Aether version string.
 func Version() string {
 	return fmt.Sprintf("Aether %s", version.AetherVersion)
 }
 
-// EffectiveConfig returns the final public configuration in effect.
+// EffectiveConfig returns the final public configuration in effect for the client.
+//
+// Does not expose internal-only config fields.
 func (c *Client) EffectiveConfig() Config {
 	if c == nil || c.cfg == nil {
 		return Config{}
