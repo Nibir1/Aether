@@ -1,28 +1,55 @@
 // internal/model/document.go
 //
-// Package model defines Aether's internal normalized document model.
-// This is the canonical, implementation-agnostic representation that
-// all higher-level formats (JSON, TOON, etc.) are derived from.
+// Package model defines Aether's canonical normalized document model.
+// All high-level outputs (Search, Article extraction, RSS, OpenAPI,
+// Entities, Plugins) are converted into this structure before final
+// JSON or TOON serialization.
 //
-// The goal is to have a single, stable structure that can represent
-// the output of Search, ExtractArticle, RSS parsing, and OpenAPI
-// integrations in a way that is LLM-friendly and easy to serialize.
+// The purpose of this package is to provide a single, stable schema
+// that is easy for applications and LLMs to consume, while remaining
+// flexible enough to represent:
+//   - Articles (HTML → readable content)
+//   - Feeds (RSS/Atom)
+//   - JSON or text pages
+//   - Binary or unsupported content
+//   - Structured entities (Wikidata, OpenAPI GOV data, etc.)
+//   - Plugin-defined structured objects
 
 package model
 
-// SectionRole describes the semantic role of a section.
+//
+// ──────────────────────────────────────────────────────────────────────────
+//                               SECTION ROLES
+// ──────────────────────────────────────────────────────────────────────────
+//
+
+// SectionRole describes the semantic purpose of a section.
 type SectionRole string
 
 const (
-	SectionRoleBody     SectionRole = "body"
-	SectionRoleSummary  SectionRole = "summary"
+	// Traditional article sections
+	SectionRoleBody    SectionRole = "body"
+	SectionRoleSummary SectionRole = "summary"
+
+	// RSS/Atom feed items
 	SectionRoleFeedItem SectionRole = "feed_item"
+
+	// Structured entities (Wikidata, gov APIs, plugin entities)
+	SectionRoleEntity SectionRole = "entity"
+
+	// Special metadata sections (fallback)
 	SectionRoleMetadata SectionRole = "metadata"
-	SectionRoleUnknown  SectionRole = "unknown"
+
+	// Unknown / unspecified
+	SectionRoleUnknown SectionRole = "unknown"
 )
 
-// Section represents a logical chunk of content within a document.
-// For example, an article body, a feed item summary, or a metadata note.
+// Section represents a logical content unit within a document.
+// Examples:
+//   - article body section
+//   - feed item
+//   - structured entity (key/values)
+//   - metadata notes
 type Section struct {
 	Role    SectionRole       `json:"role,omitempty"`
 	Heading string            `json:"heading,omitempty"`
@@ -30,26 +57,57 @@ type Section struct {
 	Meta    map[string]string `json:"meta,omitempty"`
 }
 
-// DocumentKind is the high-level kind of normalized document.
+//
+// ──────────────────────────────────────────────────────────────────────────
+//                              DOCUMENT KINDS
+// ──────────────────────────────────────────────────────────────────────────
+//
+
+// DocumentKind classifies the normalized document at a high level.
 type DocumentKind string
 
 const (
+	// Default / unknown
 	DocumentKindUnknown DocumentKind = "unknown"
+
+	// Article-like content (readability extraction)
 	DocumentKindArticle DocumentKind = "article"
-	DocumentKindHTML    DocumentKind = "html_page"
-	DocumentKindFeed    DocumentKind = "feed"
-	DocumentKindJSON    DocumentKind = "json"
-	DocumentKindText    DocumentKind = "text"
-	DocumentKindBinary  DocumentKind = "binary"
+
+	// HTML page (non-article or generic)
+	DocumentKindHTML DocumentKind = "html_page"
+
+	// RSS/Atom feeds
+	DocumentKindFeed DocumentKind = "feed"
+
+	// JSON APIs or JSON resources
+	DocumentKindJSON DocumentKind = "json"
+
+	// Plain text pages
+	DocumentKindText DocumentKind = "text"
+
+	// Binary or unsupported content
+	DocumentKindBinary DocumentKind = "binary"
+
+	// Structured entity (Wikidata, Gov APIs, Marketplace APIs, Plugins)
+	DocumentKindEntity DocumentKind = "entity"
 )
 
-// Document is Aether's canonical normalized document.
 //
-// Every SearchResult, article extraction, feed, or OpenAPI response
-// that is intended for LLM consumption should be convertible into
-// this structure.
+// ──────────────────────────────────────────────────────────────────────────
+//                                DOCUMENT
+// ──────────────────────────────────────────────────────────────────────────
+//
+
+// Document is Aether's canonical normalized representation.
+//
+// Every high-level result—SearchResult, Article, Feed, Entity, JSON API,
+// plugin output—gets converted into this structure before final
+// serialization to JSON or TOON.
+//
+// Applications consuming Aether should operate on this type rather than
+// on source-specific types (SearchResult, Article, Feed, etc.).
 type Document struct {
-	// Basic identity
+	// Basic identity + source reference
 	SourceURL string       `json:"source_url,omitempty"`
 	Kind      DocumentKind `json:"kind"`
 
@@ -58,9 +116,14 @@ type Document struct {
 	Excerpt string `json:"excerpt,omitempty"`
 	Content string `json:"content,omitempty"`
 
-	// Arbitrary metadata (flattened key/value map)
+	// Arbitrary key/value metadata
 	Metadata map[string]string `json:"metadata,omitempty"`
 
-	// Optional structured sections (article body, feed entries, etc.)
+	// Structured content
+	// Examples:
+	//   - article body paragraphs
+	//   - feed items
+	//   - structured entity fields
+	//   - metadata blocks
 	Sections []Section `json:"sections,omitempty"`
 }
