@@ -1,148 +1,288 @@
 // internal/display/table.go
 //
-// This file implements Aether’s Markdown table renderer.
-// It provides utilities for rendering structured tabular data
-// such as metadata maps, OpenAPI responses, feed lists, or
-// any structured key/value data.
+// Theme-aware table rendering for Aether’s Display subsystem.
 //
-// The resulting tables follow GitHub Flavored Markdown (GFM) rules.
-// All output is deterministic, consistent, and pure Markdown
-// (no HTML, no ANSI).
+// This renderer supports:
+//   • Unicode or ASCII borders (Theme.AsciiOnly)
+//   • Column width calculation based on Theme.TablePadding
+//   • Word wrapping according to Theme.EffectiveWidth()
+//   • Header and body styling via TableStyle (bold, faint, colorize)
+//   • ANSI styling via color.go
 //
-// Features:
-//   - Automatic column-width calculation
-//   - Proper escaping of Markdown-breaking characters
-//   - Deterministic column ordering for maps (sorted by key)
-//   - LLM-friendly formatting
-//   - No dependencies, pure Go.
+// Used internally by Renderer.RenderTable(), Renderer.RenderPreview(),
+// and model_render.go when a document section requests table formatting.
 
 package display
 
 import (
-	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
-// Table represents a generic Markdown table.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//                                TABLE TYPES
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
+// Table represents a simple table with optional header row.
 type Table struct {
-	Headers []string
-	Rows    [][]string
+	Header []string
+	Rows   [][]string
 }
 
-// RenderTable returns a Markdown-formatted table.
-// The returned string does NOT include surrounding blank lines, giving
-// the caller control over spacing.
 //
-// Rules:
-//   - Headers define the number of columns.
-//   - All rows must have the same number of columns.
-//   - Markdown characters are properly escaped.
-//   - Columns auto-size to the widest cell.
-func RenderTable(t Table) string {
-	if len(t.Headers) == 0 {
+// ─────────────────────────────────────────────────────────────────────────────
+//                               MAIN RENDERER
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
+// RenderTable renders a Table using theme-aware formatting.
+func RenderTable(t Theme, tbl Table) string {
+	t = sanitizeTheme(t)
+
+	if len(tbl.Header) == 0 && len(tbl.Rows) == 0 {
 		return ""
 	}
 
-	cols := len(t.Headers)
-	widths := make([]int, cols)
-
-	// Calculate column widths from headers first.
-	for i, h := range t.Headers {
-		w := len(escapeTableContent(h))
-		if w > widths[i] {
-			widths[i] = w
-		}
+	// Determine usable width.
+	totalWidth := t.EffectiveWidth(80)
+	if totalWidth < 20 {
+		totalWidth = 20
 	}
 
-	// Now size from row data.
-	for _, row := range t.Rows {
-		if len(row) != cols {
-			// Skip malformed rows silently; Aether does
-			// not allow panics in rendering.
-			continue
-		}
-		for i, cell := range row {
-			w := len(escapeTableContent(cell))
-			if w > widths[i] {
-				widths[i] = w
-			}
-		}
+	// Build unified list of rows.
+	all := [][]string{}
+	if len(tbl.Header) > 0 {
+		all = append(all, tbl.Header)
 	}
+	all = append(all, tbl.Rows...)
+
+	// Calculate column widths.
+	colWidths := computeColumnWidths(all, totalWidth, t.TablePadding)
 
 	var b strings.Builder
 
-	// Write header row.
-	for i, h := range t.Headers {
-		b.WriteString("| ")
-		b.WriteString(padRight(escapeTableContent(h), widths[i]))
-		b.WriteString(" ")
+	// Header row.
+	if len(tbl.Header) > 0 {
+		b.WriteString(renderTableRow(t, tbl.Header, colWidths, t.TableHeaderStyle))
+		b.WriteByte('\n')
+		b.WriteString(renderTableSeparator(t, colWidths))
+		b.WriteByte('\n')
 	}
-	b.WriteString("|\n")
 
-	// Write separator row.
-	for i := range t.Headers {
-		b.WriteString("| ")
-		b.WriteString(strings.Repeat("-", widths[i]))
-		b.WriteString(" ")
-	}
-	b.WriteString("|\n")
-
-	// Write data rows.
-	for _, row := range t.Rows {
-		if len(row) != cols {
-			continue
+	// Body rows.
+	for i, r := range tbl.Rows {
+		b.WriteString(renderTableRow(t, r, colWidths, t.TableBodyStyle))
+		if i < len(tbl.Rows)-1 {
+			b.WriteByte('\n')
 		}
-		for i, cell := range row {
-			b.WriteString("| ")
-			b.WriteString(padRight(escapeTableContent(cell), widths[i]))
-			b.WriteString(" ")
-		}
-		b.WriteString("|\n")
 	}
 
 	return b.String()
 }
 
-// RenderKeyValueTable renders a map[string]string as a two-column
-// Markdown table, sorted by key. This is ideal for metadata blocks
-// or flattening JSON-like objects for LLMs or CLI display.
-func RenderKeyValueTable(m map[string]string) string {
-	if len(m) == 0 {
-		return ""
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//                       COLUMN WIDTH CALCULATION
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
+// computeColumnWidths determines each column’s width with padding and scaling.
+func computeColumnWidths(rows [][]string, totalWidth int, pad int) []int {
+	if len(rows) == 0 {
+		return nil
 	}
 
-	// Stable order: sorted keys.
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	cols := len(rows[0])
+	w := make([]int, cols)
 
-	t := Table{
-		Headers: []string{"Key", "Value"},
-		Rows:    make([][]string, 0, len(m)),
+	// Longest cell in each column.
+	for _, row := range rows {
+		for c := 0; c < cols; c++ {
+			cell := ""
+			if c < len(row) {
+				cell = row[c]
+			}
+			n := displayLen(cell)
+			if n > w[c] {
+				w[c] = n
+			}
+		}
 	}
 
-	for _, k := range keys {
-		t.Rows = append(t.Rows, []string{k, m[k]})
+	// Apply padding.
+	sum := 0
+	for i := range w {
+		w[i] += pad * 2
+		sum += w[i]
 	}
 
-	return RenderTable(t)
+	// Scale down if exceeding totalWidth.
+	if sum > totalWidth {
+		scale := float64(totalWidth) / float64(sum)
+		for i := range w {
+			newW := int(float64(w[i]) * scale)
+			if newW < 5 {
+				newW = 5
+			}
+			w[i] = newW
+		}
+	}
+
+	return w
 }
 
-// escapeTableContent escapes characters that can break Markdown tables.
-// We escape pipes and backslashes; headings and other Markdown formatting
-// are NOT escaped here, only table-breaking characters.
-func escapeTableContent(s string) string {
-	s = strings.ReplaceAll(s, "|", "\\|")
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	return strings.TrimSpace(s)
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//                               ROW RENDERING
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
+// renderTableRow renders a single row with wrapping and styling.
+func renderTableRow(th Theme, row []string, widths []int, style TableStyle) string {
+	var lines [][]string
+
+	// Wrap each cell to width.
+	for i, colWidth := range widths {
+		text := ""
+		if i < len(row) {
+			text = strings.TrimSpace(row[i])
+		}
+		wrapped := wrapTextToWidth(text, colWidth)
+		lines = append(lines, strings.Split(wrapped, "\n"))
+	}
+
+	// Determine row height.
+	maxH := 1
+	for _, cell := range lines {
+		if len(cell) > maxH {
+			maxH = len(cell)
+		}
+	}
+
+	b := strings.Builder{}
+
+	// Build lines top-aligned.
+	for line := 0; line < maxH; line++ {
+		for c := 0; c < len(widths); c++ {
+			cell := ""
+			if line < len(lines[c]) {
+				cell = lines[c][line]
+			}
+
+			// Apply ANSI styling.
+			cell = applyTableStyle(th, cell, style)
+
+			// Pad to width.
+			cell = padRight(cell, widths[c])
+			b.WriteString(cell)
+		}
+		if line < maxH-1 {
+			b.WriteByte('\n')
+		}
+	}
+
+	return b.String()
 }
 
-// padRight pads a string with spaces to a target width.
-func padRight(s string, w int) string {
-	if len(s) >= w {
+// applyTableStyle applies bold, faint, or color styling based on Theme.
+func applyTableStyle(t Theme, s string, st TableStyle) string {
+	if s == "" {
 		return s
 	}
-	return s + strings.Repeat(" ", w-len(s))
+
+	out := s
+	if st.Bold {
+		out = styleStrong(t, out)
+	}
+	if st.Faint {
+		out = styleMeta(t, out)
+	}
+	if st.Colorize {
+		out = styleCode(t, out)
+	}
+	return out
+}
+
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//                            SEPARATOR RENDERING
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
+// renderTableSeparator renders a horizontal separator.
+//
+// Unicode example:
+//
+//	─────┼──────────┼─────
+//
+// ASCII fallback:
+//
+//	-----+----------+------
+func renderTableSeparator(t Theme, widths []int) string {
+	var b strings.Builder
+
+	sep := "─"
+	joint := "┼"
+
+	if t.AsciiOnly {
+		sep = "-"
+		joint = "+"
+	}
+
+	for i, w := range widths {
+		b.WriteString(strings.Repeat(sep, w))
+		if i < len(widths)-1 {
+			b.WriteString(joint)
+		}
+	}
+
+	return b.String()
+}
+
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//                               UTILITY FUNCTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
+// displayLen returns printable width ignoring ANSI escape codes.
+func displayLen(s string) int {
+	return utf8.RuneCountInString(stripANSI(s))
+}
+
+// padRight pads to the right with spaces.
+func padRight(s string, width int) string {
+	n := displayLen(s)
+	if n >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-n)
+}
+
+// stripANSI removes ANSI codes for width calculation.
+func stripANSI(s string) string {
+	var out strings.Builder
+	inEsc := false
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+
+		if c == 0x1b { // ESC
+			inEsc = true
+			continue
+		}
+
+		if inEsc {
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+				inEsc = false
+			}
+			continue
+		}
+
+		out.WriteByte(c)
+	}
+
+	return out.String()
 }

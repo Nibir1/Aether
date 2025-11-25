@@ -1,22 +1,27 @@
 // internal/display/preview.go
 //
-// This file defines Aether’s preview utilities. Previews are short,
-// human-readable summaries or snippets derived from normalized documents.
+// Preview rendering for Aether’s Display subsystem.
 //
-// They are used by:
-//   - Search result lists
-//   - CLI interfaces (list view)
-//   - TUI view components
-//   - LLM prompt preparation
+// This file provides compact, human-friendly previews of normalized
+// model.Document values. Previews are ideal for:
 //
-// Previews follow three goals:
+//   • CLI search results
+//   • TUI lists
+//   • Quick summaries
+//   • Logging
 //
-//   1. Brevity       — only the most important parts of a document.
-//   2. Determinism   — same input produces same preview.
-//   3. Safety        — no expensive parsing; relies on pre-normalized data.
+// A preview contains:
+//   • Title (if any)
+//   • Excerpt (if any)
+//   • Or the first non-empty paragraph of body text
 //
-// This module does NOT render Markdown; it produces plain text snippets.
-// (Markdown rendering happens in markdown.go.)
+// Previews respect:
+//   • Theme width (EffectiveWidth)
+//   • UTF-8 safe truncation
+//   • ANSI color rules via styleHeading / styleEm
+//
+// This renderer does not depend on the full model_render pipeline;
+// it is intentionally lightweight for performance and clarity.
 
 package display
 
@@ -26,107 +31,129 @@ import (
 	"github.com/Nibir1/Aether/internal/model"
 )
 
-// Preview contains a compact representation of a document for listing
-// or summary purposes.
+// Preview represents a human-friendly short display representation
+// of a normalized document.
 type Preview struct {
-	Title    string
-	Excerpt  string
-	Snippet  string // 1–3 meaningful body paragraphs
-	Metadata map[string]string
+	Title   string
+	Summary string
 }
 
-// BuildPreview creates a short preview suitable for CLI/TUI search results,
-// list pages, or summary displays.
+// PreviewRenderer renders Preview structs using a Theme.
+type PreviewRenderer struct {
+	Theme Theme
+}
+
+// NewPreviewRenderer constructs a preview renderer using the given Theme.
+func NewPreviewRenderer(t Theme) PreviewRenderer {
+	return PreviewRenderer{Theme: sanitizeTheme(t)}
+}
+
+// MakePreview extracts a Preview struct from a normalized Document.
 //
-// Behavior:
-//   - Uses Title → Excerpt → first paragraphs → first section paragraphs
-//   - Strips whitespace
-//   - Truncates long text intelligently
-//   - Ensures deterministic output
+// Rules:
+//  1. Title = doc.Title OR fallback to SourceURL.
+//  2. Summary = doc.Excerpt OR first non-empty paragraph from sections or content.
 //
-// This function never panics and is safe to call with nil.
-func BuildPreview(doc *model.Document) Preview {
+// This struct-level function does not perform formatting; renderers do.
+func (PreviewRenderer) MakePreview(doc *model.Document) Preview {
 	if doc == nil {
-		return Preview{
-			Title:    "",
-			Excerpt:  "",
-			Snippet:  "",
-			Metadata: map[string]string{},
-		}
+		return Preview{}
 	}
 
-	rm := BuildRenderModel(doc) // convert to display model
-
-	preview := Preview{
-		Title:    rm.Title,
-		Excerpt:  rm.Excerpt,
-		Metadata: map[string]string{},
+	// Title selection.
+	title := strings.TrimSpace(doc.Title)
+	if title == "" {
+		title = strings.TrimSpace(doc.SourceURL)
 	}
 
-	// Copy metadata only for keys that are useful for previewing.
-	for k, v := range rm.Metadata {
-		preview.Metadata[k] = v
-	}
-
-	// Build snippet: try body paragraphs first.
-	snippet := ""
-
-	if len(rm.BodyParagraphs) > 0 {
-		snippet = rm.BodyParagraphs[0]
-
-		if len(rm.BodyParagraphs) > 1 {
-			snippet = snippet + " " + rm.BodyParagraphs[1]
-		}
+	// Summary selection:
+	//   Priority: Excerpt → first section paragraph → Content
+	summary := ""
+	if strings.TrimSpace(doc.Excerpt) != "" {
+		summary = doc.Excerpt
 	} else {
-		// fallback to first section paragraphs
-		for _, sec := range rm.Sections {
-			if len(sec.Paragraphs) > 0 {
-				snippet = sec.Paragraphs[0]
-				if len(sec.Paragraphs) > 1 {
-					snippet = snippet + " " + sec.Paragraphs[1]
-				}
-				break
+		summary = firstNonEmptyParagraph(doc)
+	}
+
+	return Preview{
+		Title:   title,
+		Summary: summary,
+	}
+}
+
+// RenderPreview produces a human-readable, theme-aware single-block preview
+// suitable for CLI or UI list displays.
+func (r PreviewRenderer) RenderPreview(p Preview) string {
+	if p.Title == "" && p.Summary == "" {
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Render title
+	if p.Title != "" {
+		h := styleHeading(r.Theme, p.Title)
+		h = wrapTextToWidth(h, EffectiveWidth(r.Theme))
+		b.WriteString(h)
+	}
+
+	// Render summary
+	if p.Summary != "" {
+		if p.Title != "" {
+			b.WriteByte('\n')
+		}
+		sum := strings.TrimSpace(p.Summary)
+		sum = styleEm(r.Theme, sum)
+		sum = wrapTextToWidth(sum, EffectiveWidth(r.Theme))
+		b.WriteString(sum)
+	}
+
+	return b.String()
+}
+
+//
+//────────────────────────────────────────────────────────────────────────────
+//                              HELPERS
+//────────────────────────────────────────────────────────────────────────────
+//
+
+// firstNonEmptyParagraph tries to extract the first meaningful paragraph
+// from Document.Content or Document.Sections.
+func firstNonEmptyParagraph(doc *model.Document) string {
+	// 1. Try content paragraphs
+	if strings.TrimSpace(doc.Content) != "" {
+		par := firstParagraph(doc.Content)
+		if par != "" {
+			return par
+		}
+	}
+
+	// 2. Try section bodies
+	for _, s := range doc.Sections {
+		if strings.TrimSpace(s.Text) != "" {
+			par := firstParagraph(s.Text)
+			if par != "" {
+				return par
 			}
 		}
 	}
 
-	preview.Snippet = cleanAndTruncate(snippet, 320) // soft truncation
-
-	return preview
+	return ""
 }
 
-// cleanAndTruncate collapses whitespace and truncates to maxLen characters,
-// adding a “…” suffix when truncation occurs.
-func cleanAndTruncate(s string, maxLen int) string {
-	s = strings.TrimSpace(s)
-	s = collapseWhitespace(s)
-
-	if len(s) <= maxLen {
-		return s
-	}
-	if maxLen <= 3 {
-		return s[:maxLen]
+// firstParagraph extracts the first non-empty paragraph (double-newline separated).
+func firstParagraph(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
 	}
 
-	return s[:maxLen-3] + "..."
-}
-
-// collapseWhitespace replaces runs of whitespace with a single space.
-func collapseWhitespace(s string) string {
-	out := make([]rune, 0, len(s))
-	space := false
-
-	for _, r := range s {
-		if r == ' ' || r == '\n' || r == '\t' || r == '\r' {
-			if !space {
-				out = append(out, ' ')
-			}
-			space = true
-		} else {
-			out = append(out, r)
-			space = false
+	blocks := strings.Split(text, "\n\n")
+	for _, b := range blocks {
+		b = strings.TrimSpace(b)
+		if b != "" {
+			return b
 		}
 	}
-
-	return strings.TrimSpace(string(out))
+	return ""
 }

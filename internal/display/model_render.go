@@ -1,18 +1,18 @@
 // internal/display/model_render.go
 //
-// This file defines a small, display-oriented abstraction over the
-// normalized model.Document type. While model.Document is the canonical
-// normalized representation used by Aether internally, the Display layer
-// often benefits from a slightly different shape:
+// Rendering of normalized model.Document values into human-readable,
+// theme-aware text. This is the main bridge between Aether's internal
+// normalized model and the Display subsystem.
 //
-//   - Content already split into paragraphs
-//   - Sections flattened into renderable units
-//   - Metadata copied into a stable map
+// The renderer:
 //
-// RenderModel and its helpers are designed to be shared by multiple
-// output backends (Markdown, plain text, ANSI, HTML) without each
-// renderer having to repeat paragraph-splitting and section-normalizing
-// logic.
+//   • Produces Markdown-like plain text safe for terminals, logs,
+//     and chat interfaces.
+//   • Respects Theme width, indentation, color mode, and heading styles.
+//   • Treats sections differently based on their SectionRole
+//     (body, feed_item, entity, metadata, etc.).
+//   • Optionally shows section roles like [feed_item] when
+//     Theme.ShowSectionRoles is true.
 
 package display
 
@@ -22,90 +22,275 @@ import (
 	"github.com/Nibir1/Aether/internal/model"
 )
 
-// RenderSection represents a display-ready section derived from
-// model.Section. It contains pre-split paragraphs and a stable
-// metadata map.
-type RenderSection struct {
-	Title      string
-	Role       model.SectionRole
-	Paragraphs []string
-	Meta       map[string]string
+// Renderer renders normalized documents according to a Theme.
+type Renderer struct {
+	Theme Theme
 }
 
-// RenderModel is a display-oriented view of a normalized document.
+// NewRenderer constructs a Renderer using the provided Theme.
 //
-// It is intentionally focused on what renderers need:
-//   - Title and excerpt
-//   - Stable metadata
-//   - Top-level body paragraphs
-//   - A list of structured sections, each with paragraphs and metadata
-type RenderModel struct {
-	Title          string
-	Excerpt        string
-	Metadata       map[string]string
-	BodyParagraphs []string
-	Sections       []RenderSection
+// The Theme is sanitized to ensure it has sensible defaults (indent,
+// bullet, code fence, table padding, etc.).
+func NewRenderer(t Theme) Renderer {
+	return Renderer{
+		Theme: sanitizeTheme(t),
+	}
 }
 
-// BuildRenderModel constructs a RenderModel from a normalized document.
-//
-// It performs paragraph splitting, shallow metadata copying, and
-// section normalization. This keeps higher-level renderers simple and
-// avoids repeating core transformation logic for each output format.
-//
-// The function is safe to call with nil; in that case it returns an
-// empty RenderModel.
-func BuildRenderModel(doc *model.Document) *RenderModel {
+// RenderDocument renders a normalized Document into a theme-aware,
+// human-readable string. The result is suitable for terminals, logs,
+// and Markdown-capable viewers.
+func (r Renderer) RenderDocument(doc *model.Document) string {
 	if doc == nil {
-		return &RenderModel{
-			Title:          "",
-			Excerpt:        "",
-			Metadata:       map[string]string{},
-			BodyParagraphs: nil,
-			Sections:       nil,
+		return ""
+	}
+
+	var b strings.Builder
+	width := r.Theme.EffectiveWidth(80)
+
+	// Title
+	title := strings.TrimSpace(doc.Title)
+	if title == "" && doc.SourceURL != "" {
+		title = strings.TrimSpace(doc.SourceURL)
+	}
+	if title != "" {
+		renderedTitle := r.renderHeading(1, title)
+		b.WriteString(renderedTitle)
+		b.WriteByte('\n')
+		b.WriteByte('\n')
+	}
+
+	// Excerpt (if present)
+	if strings.TrimSpace(doc.Excerpt) != "" {
+		excerpt := wrapTextToWidth(strings.TrimSpace(doc.Excerpt), width)
+		excerpt = styleEm(r.Theme, excerpt)
+		b.WriteString(excerpt)
+		b.WriteByte('\n')
+		b.WriteByte('\n')
+	}
+
+	// Metadata (compact)
+	if len(doc.Metadata) > 0 {
+		metaLines := r.renderMetadata(doc.Metadata, width)
+		if metaLines != "" {
+			b.WriteString(metaLines)
+			b.WriteByte('\n')
+			b.WriteByte('\n')
 		}
 	}
 
-	rm := &RenderModel{
-		Title:    strings.TrimSpace(doc.Title),
-		Excerpt:  strings.TrimSpace(doc.Excerpt),
-		Metadata: map[string]string{},
+	// Content (fallback when there are no sections)
+	if strings.TrimSpace(doc.Content) != "" && len(doc.Sections) == 0 {
+		body := wrapTextToWidth(strings.TrimSpace(doc.Content), width)
+		b.WriteString(body)
+		return strings.TrimRight(b.String(), "\n")
 	}
 
-	// Copy metadata so renderers can safely mutate if needed.
-	for k, v := range doc.Metadata {
-		rm.Metadata[k] = v
+	// Sections
+	for i, s := range doc.Sections {
+		sec := r.renderSection(&s, width)
+		if sec == "" {
+			continue
+		}
+		b.WriteString(sec)
+		if i < len(doc.Sections)-1 {
+			b.WriteByte('\n')
+			b.WriteByte('\n')
+		}
 	}
 
-	// Split top-level content into paragraphs.
-	if strings.TrimSpace(doc.Content) != "" {
-		rm.BodyParagraphs = splitParagraphs(doc.Content)
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// RenderMarkdown is a convenience alias for RenderDocument, so that
+// public APIs can explicitly express the intention to produce
+// Markdown-like text.
+func (r Renderer) RenderMarkdown(doc *model.Document) string {
+	return r.RenderDocument(doc)
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────
+//                           SECTION RENDERING
+// ────────────────────────────────────────────────────────────────────────
+//
+
+func (r Renderer) renderSection(s *model.Section, width int) string {
+	if s == nil {
+		return ""
 	}
 
-	// Normalize sections: split text into paragraphs and copy meta.
-	for _, sec := range doc.Sections {
-		rs := RenderSection{
-			Title:      strings.TrimSpace(sec.Heading),
-			Role:       sec.Role,
-			Paragraphs: nil,
-			Meta:       map[string]string{},
-		}
+	var b strings.Builder
 
-		// If no explicit heading, fall back to role label.
-		if rs.Title == "" {
-			rs.Title = string(sec.Role)
-		}
-
-		if strings.TrimSpace(sec.Text) != "" {
-			rs.Paragraphs = splitParagraphs(sec.Text)
-		}
-
-		for k, v := range sec.Meta {
-			rs.Meta[k] = v
-		}
-
-		rm.Sections = append(rm.Sections, rs)
+	// Optional section role label.
+	if r.Theme.ShowSectionRoles {
+		label := "[" + string(s.Role) + "]"
+		b.WriteString(styleMeta(r.Theme, label))
+		b.WriteByte('\n')
 	}
 
-	return rm
+	heading := strings.TrimSpace(s.Heading)
+	text := strings.TrimSpace(s.Text)
+
+	switch s.Role {
+	case model.SectionRoleBody, model.SectionRoleSummary, model.SectionRoleUnknown:
+		// Article or generic body content.
+		if heading != "" {
+			h := r.renderHeading(2, heading)
+			b.WriteString(h)
+			b.WriteByte('\n')
+			b.WriteByte('\n')
+		}
+		if text != "" {
+			body := wrapTextToWidth(text, width)
+			b.WriteString(body)
+		}
+
+	case model.SectionRoleFeedItem:
+		// Feed item: heading + text, bullet-style.
+		line := heading
+		if line == "" {
+			line = "(feed item)"
+		}
+		line = styleStrong(r.Theme, line)
+		line = r.Theme.Bullet + " " + line
+		line = wrapTextToWidth(line, width)
+		b.WriteString(line)
+
+		if text != "" {
+			b.WriteByte('\n')
+			body := wrapTextToWidth(text, width)
+			b.WriteString(body)
+		}
+
+	case model.SectionRoleEntity:
+		// Entity: heading as strong, summary body, plus metadata.
+		if heading != "" {
+			h := styleStrong(r.Theme, heading)
+			h = wrapTextToWidth(h, width)
+			b.WriteString(h)
+			b.WriteByte('\n')
+		}
+		if text != "" {
+			body := wrapTextToWidth(text, width)
+			b.WriteString(body)
+		}
+		if len(s.Meta) > 0 {
+			if text != "" {
+				b.WriteByte('\n')
+			}
+			metaLines := r.renderMetadata(s.Meta, width)
+			if metaLines != "" {
+				b.WriteString(metaLines)
+			}
+		}
+
+	case model.SectionRoleMetadata:
+		// Pure metadata section.
+		if heading != "" {
+			h := r.renderHeading(3, heading)
+			b.WriteString(h)
+			b.WriteByte('\n')
+		}
+		if len(s.Meta) > 0 {
+			metaLines := r.renderMetadata(s.Meta, width)
+			if metaLines != "" {
+				b.WriteString(metaLines)
+			}
+		}
+
+	default:
+		// Fallback: body-like rendering.
+		if heading != "" {
+			h := r.renderHeading(2, heading)
+			b.WriteString(h)
+			b.WriteByte('\n')
+			b.WriteByte('\n')
+		}
+		if text != "" {
+			body := wrapTextToWidth(text, width)
+			b.WriteString(body)
+		}
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────
+//                            METADATA RENDERING
+// ────────────────────────────────────────────────────────────────────────
+//
+
+func (r Renderer) renderMetadata(meta map[string]string, width int) string {
+	if len(meta) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	for k, v := range meta {
+		key := strings.TrimSpace(k)
+		val := strings.TrimSpace(v)
+		if key == "" || val == "" {
+			continue
+		}
+
+		line := key + ": " + val
+		line = wrapTextToWidth(line, width)
+		line = styleMeta(r.Theme, line)
+
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────
+//                          HEADING RENDERING
+// ────────────────────────────────────────────────────────────────────────
+//
+
+func (r Renderer) renderHeading(level int, text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+
+	style := r.Theme.HeadingForLevel(level)
+
+	headingText := text
+	if style.Uppercase {
+		headingText = strings.ToUpper(headingText)
+	}
+
+	var b strings.Builder
+
+	// Prefix-based style (e.g. "# ", "## ", "• ").
+	if style.Prefix != "" {
+		b.WriteString(style.Prefix)
+		b.WriteString(headingText)
+	} else {
+		b.WriteString(headingText)
+	}
+
+	rendered := b.String()
+
+	// Apply ANSI styling for headings.
+	rendered = styleHeading(r.Theme, rendered)
+
+	// Optional underline style:
+	//   Title
+	//   =====
+	if style.Underline {
+		underlineRune := style.UnderlineRune
+		if underlineRune == 0 {
+			underlineRune = '='
+		}
+		underline := strings.Repeat(string(underlineRune), len(headingText))
+		return rendered + "\n" + underline
+	}
+
+	return rendered
 }

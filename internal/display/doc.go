@@ -1,77 +1,58 @@
-// internal/display/doc.go
+// Package display provides Aether’s rich output-rendering subsystem.
 //
-// Package display implements Aether’s presentation layer. It provides a
-// theme–aware Markdown rendering pipeline for normalized documents
-// (internal/model.Document) produced by the Normalize subsystem.
+// This package is responsible for converting normalized Aether documents
+// into human-readable, theme-aware representations such as:
 //
-// The Display subsystem is intentionally modular and is split across several
-// focused source files:
+//   - Markdown (primary output format)
+//   - ANSI-colored terminal views
+//   - Width-aware text tables
+//   - Short previews for CLI / TUI interfaces
 //
-//	markdown.go      – Markdown renderer (primary user-facing renderer)
-//	themes.go        – Built-in Markdown theme definitions
-//	model_render.go  – Internal helpers for turning model.Document content
-//	                    into render-ready components (paragraphs, sections,
-//	                    metadata blocks). Designed for future non-Markdown
-//	                    output formats.
-//	preview.go       – Document preview generator (short excerpts, summaries,
-//	                    feed overviews). Used in later Search and TUI layers.
-//	table.go         – Markdown table rendering utilities for normalized
-//	                    metadata and structured content
+// The Display subsystem supports four major features:
 //
-// # Rendering Philosophy
+//  1. ANSI-aware color rendering
+//     • Safe fallback when color is not supported
+//     • Works in terminals, logs, and non-TTY environments
 //
-// Aether is designed to be LLM-friendly and human-readable. The Display
-// subsystem therefore follows these guiding principles:
+//  2. Theme profiles (Theme)
+//     • DefaultTheme
+//     • DarkTheme
+//     • MinimalTheme
+//     • PaperTheme (no ANSI, printer-style)
 //
-//   - Pure, standard Markdown — no HTML, no ANSI escape codes.
-//     (ANSI colors will be introduced in a later dedicated stage.)
+//  3. Adaptive width rendering
+//     • Detects terminal width at runtime
+//     • Falls back to 80–100 characters when unknown
+//     • Provides wrapping, truncation, and preview helpers
 //
-//   - Themeable output. All rendered Markdown can use one of several
-//     built-in themes (GitHub Dark, Solarized, Gruvbox, Minimalist).
-//     Themes alter visual accents while remaining fully valid Markdown.
+//  4. Markdown transformation
+//     • Heading styles
+//     • Code blocks
+//     • Lists, links, inline emphasis
+//     • Table rendering
 //
-//   - Deterministic output. The same input document will always render
-//     identically under a given theme, ensuring stable hashing,
-//     deterministic caching, and reproducible LLM prompts.
+// Architecture:
 //
-//   - Structure-preserving. Sections, metadata, paragraphs, summaries, and
-//     feed items are rendered in a way that preserves semantic meaning,
-//     enabling better downstream reasoning by models.
+//	theme.go         → theme definitions + runtime feature detection
+//	color.go         → ANSI color & style helpers (with fallbacks)
+//	width.go         → terminal width detection + text wrapping
+//	markdown.go      → generic Markdown formatting
+//	model_render.go  → render model.Document into Markdown
+//	table.go         → flexible Unicode/ASCII table renderer
+//	preview.go       → short previews (title + excerpt)
 //
-// # Input Model
+// The package is intentionally decoupled from:
+//   - async fetcher
+//   - plugins
+//   - normalization
 //
-// The renderer consumes the normalized internal/model.Document type.
-// Every SearchResult eventually becomes a normalized Document, meaning the
-// Display subsystem does not need to understand:
-//   - HTML trees
-//   - extracted article metadata
-//   - feed formats
-//   - raw HTTP response bodies
+// allowing it to be used not only for Aether.Search(), but also for
+// rendering OpenAPI results, feed items, or user-generated documents.
 //
-// All extraction and normalization happens earlier in the pipeline.
+// Export policy:
 //
-// # Extensibility
+//	Internal-only. Public rendering APIs live in aether/display.go in later stages.
 //
-// While Stage 12 introduces only Markdown rendering, the architecture is
-// intentionally designed to support:
-//
-//   - plain-text output
-//   - ANSI-styled CLI output
-//   - HTML rendering
-//   - TOON previews
-//   - TUI widgets (tables, cards, summaries)
-//
-// These will be added in future stages without needing to redesign the
-// Display subsystem.
-//
-// # Usage (public API)
-//
-// Aether's public package exposes:
-//
-//	client.RenderMarkdown(doc)
-//	client.RenderMarkdownWithTheme(doc, theme)
-//
-// where `doc` is a *normalized* document from NormalizeSearchResult.
-//
-// This file contains no logic. It exists solely to document the package.
+// Stage 18 establishes the foundation for fully themeable, terminal-aware
+// output rendering for both human users and LLM pipelines.
 package display

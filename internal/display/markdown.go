@@ -1,151 +1,234 @@
 // internal/display/markdown.go
 //
-// This file implements Aether’s Markdown renderer. It converts a
-// normalized model.Document into themed Markdown using the Theme
-// definitions in themes.go.
+// Markdown transformation utilities for Aether’s Display subsystem.
 //
-// Markdown rendering is intentionally pure-text, stable, and deterministic.
-// It supports:
+// This file provides the foundational building blocks used by
+// model_render.go to convert normalized documents into theme-aware
+// Markdown or plain text.
 //
-//   - Title and excerpt
-//   - Document metadata
-//   - Top-level content paragraphs
-//   - Structured sections (article body, feed items, metadata blocks)
+// Features:
+//   • Heading rendering with theme rules + optional ANSI color
+//   • Bullet lists with theme-configurable prefix
+//   • Optional line wrapping according to theme.MaxWidth / EffectiveWidth
+//   • Paragraph normalization and trimming
+//   • Inline emphasis helpers
 //
-// This file forms the backbone of Aether's human-facing outputs, including
-// CLI previews, TUI views, web displays, and LLM prompt rendering.
+// This renderer avoids “HTML in Markdown” and stays within the
+// CommonMark-safe subset so output is compatible with GitHub,
+// terminals, chatbots, and LLMs.
 
 package display
 
 import (
 	"strings"
-
-	"github.com/Nibir1/Aether/internal/model"
+	"unicode"
 )
 
-// Renderer converts normalized model.Document instances into Markdown text.
-// Each renderer instance is theme-bound.
-type Renderer struct {
-	theme Theme
-}
-
-// NewRenderer creates a new renderer using the given theme.
-func NewRenderer(theme Theme) *Renderer {
-	return &Renderer{theme: theme}
-}
-
-// RenderMarkdown converts a normalized document into Markdown.
-// This is the primary entrypoint for Presentation-layer rendering.
-func (r *Renderer) RenderMarkdown(doc *model.Document) string {
-	if doc == nil {
+// RenderHeading renders a Markdown heading (level 1–6) using the theme.
+// It applies:
+//   - optional ANSI styling (color.go)
+//   - configurable heading style (prefix, underline, uppercase)
+//   - safe trimming of whitespace
+func RenderHeading(t Theme, level int, text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return ""
+	}
+	if level < 1 {
+		level = 1
+	}
+	if level > 6 {
+		level = 6
+	}
+
+	style := t.HeadingForLevel(level)
+
+	headingText := text
+	if style.Uppercase {
+		headingText = strings.ToUpper(headingText)
 	}
 
 	var out strings.Builder
 
-	// 1. Title
-	if strings.TrimSpace(doc.Title) != "" {
-		out.WriteString(r.theme.HeadingPrefix)
-		out.WriteString(escapeMarkdown(doc.Title))
-		out.WriteString("\n\n")
+	// Prefix-based style (e.g. "# ", "## ", "• ")
+	if style.Prefix != "" {
+		out.WriteString(style.Prefix)
+		out.WriteString(headingText)
+	} else {
+		out.WriteString(headingText)
 	}
 
-	// 2. Excerpt
-	if strings.TrimSpace(doc.Excerpt) != "" {
-		out.WriteString("> ")
-		out.WriteString(escapeMarkdown(doc.Excerpt))
-		out.WriteString("\n\n")
-	}
+	rendered := out.String()
 
-	// 3. Metadata table-like list
-	if len(doc.Metadata) > 0 {
-		for k, v := range doc.Metadata {
-			out.WriteString(r.theme.MetadataPrefix)
-			out.WriteString(escapeMarkdown(k))
-			out.WriteString(": ")
-			out.WriteString(escapeMarkdown(v))
-			out.WriteString("\n")
+	// Apply ANSI styling if theme allows color.
+	rendered = styleHeading(t, rendered)
+
+	// Optional underline style:
+	//   Title
+	//   =====
+	if style.Underline {
+		underlineRune := style.UnderlineRune
+		if underlineRune == 0 {
+			underlineRune = '='
 		}
-		out.WriteString("\n")
+		underline := strings.Repeat(string(underlineRune), len(headingText))
+		rendered = rendered + "\n" + underline
 	}
 
-	// 4. Raw content paragraphs
-	if strings.TrimSpace(doc.Content) != "" {
-		paras := splitParagraphs(doc.Content)
-		for _, p := range paras {
-			out.WriteString(escapeMarkdown(p))
-			out.WriteString(r.theme.ParagraphSpacing)
-		}
-		out.WriteString("\n")
+	return rendered
+}
+
+// RenderParagraph formats a block of prose text. This includes:
+//
+//   - Normalizing whitespace
+//   - Optional wrapping to the effective width (theme + terminal)
+//   - Optional ANSI emphasis (e.g., strong/em) added later in pipeline
+//
+// The function preserves paragraph structure but removes excessive
+// internal spacing.
+func RenderParagraph(t Theme, text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
 	}
 
-	// 5. Structured sections (article body, feed items, etc.)
-	for _, sec := range doc.Sections {
-		out.WriteString(r.theme.SectionDivider)
+	// Normalize internal whitespace: convert multiple spaces to single.
+	text = collapseSpaces(text)
 
-		heading := sec.Heading
-		if heading == "" {
-			// fallback to role when heading missing
-			heading = string(sec.Role)
+	// Wrap to effective width (theme or terminal).
+	width := EffectiveWidth(t)
+	return wrapText(text, width)
+}
+
+// RenderBulletList formats a slice of bullet items using the theme’s
+// Bullet marker. Each item is rendered as a wrapped paragraph prefixed
+// by the bullet symbol.
+func RenderBulletList(t Theme, items []string) string {
+	var b strings.Builder
+	bullet := t.Bullet
+	if bullet == "" {
+		bullet = "-"
+	}
+
+	width := EffectiveWidth(t)
+
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
 		}
 
-		out.WriteString(r.theme.HeadingPrefix)
-		out.WriteString(escapeMarkdown(heading))
-		out.WriteString("\n\n")
+		line := bullet + " " + item
+		line = wrapText(line, width)
 
-		// Section text paragraphs
-		if strings.TrimSpace(sec.Text) != "" {
-			paras := splitParagraphs(sec.Text)
-			for _, p := range paras {
-				out.WriteString(escapeMarkdown(p))
-				out.WriteString(r.theme.ParagraphSpacing)
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// RenderCodeBlock wraps code in a Markdown fenced block.
+//
+// Example:
+//
+// ```
+// line1
+// line2
+// ```
+func RenderCodeBlock(code string) string {
+	code = strings.TrimRight(code, "\n")
+	return "```\n" + code + "\n```"
+}
+
+// collapseSpaces normalizes internal whitespace sequences.
+// It preserves intentional newlines but avoids text looking broken.
+func collapseSpaces(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+
+	spaceSeen := false
+	for _, r := range s {
+		if unicode.IsSpace(r) && r != '\n' {
+			if !spaceSeen {
+				b.WriteByte(' ')
+				spaceSeen = true
+			}
+		} else {
+			b.WriteRune(r)
+			spaceSeen = false
+		}
+	}
+	return b.String()
+}
+
+//
+//────────────────────────────────────────────
+//           TEXT WRAPPING UTILITIES
+//────────────────────────────────────────────
+//
+
+// wrapText performs simple greedy line wrapping to a given width.
+// It preserves words and does not break long tokens.
+//
+// This avoids external dependencies and is adequate for Aether output.
+func wrapText(s string, width int) string {
+	if width <= 0 || len(s) <= width {
+		return s
+	}
+
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return s
+	}
+
+	var out strings.Builder
+	current := ""
+
+	for _, w := range words {
+		if len(current)+len(w)+1 > width {
+			out.WriteString(strings.TrimSpace(current))
+			out.WriteByte('\n')
+			current = w
+		} else {
+			if current == "" {
+				current = w
+			} else {
+				current += " " + w
 			}
 		}
-
-		// Section metadata
-		for k, v := range sec.Meta {
-			out.WriteString(r.theme.MetadataPrefix)
-			out.WriteString(escapeMarkdown(k))
-			out.WriteString(": ")
-			out.WriteString(escapeMarkdown(v))
-			out.WriteString("\n")
-		}
-
-		out.WriteString("\n")
 	}
 
-	return strings.TrimSpace(out.String())
+	if current != "" {
+		out.WriteString(strings.TrimSpace(current))
+	}
+
+	return out.String()
 }
 
-// splitParagraphs breaks text into paragraphs using double-newline
-// boundaries while trimming surrounding whitespace.
-func splitParagraphs(text string) []string {
-	chunks := strings.Split(text, "\n\n")
-	out := make([]string, 0, len(chunks))
-	for _, c := range chunks {
-		t := strings.TrimSpace(c)
-		if t != "" {
-			out = append(out, t)
-		}
+// RenderInlineStrong applies Markdown strong formatting **...**
+// and then uses ANSI styling when enabled by the theme.
+func RenderInlineStrong(t Theme, s string) string {
+	if strings.TrimSpace(s) == "" {
+		return s
 	}
-	return out
+	return styleStrong(t, "**"+s+"**")
 }
 
-// escapeMarkdown escapes minimal Markdown characters to avoid structural breakage.
-// We deliberately avoid over-escaping to preserve as much original text as possible.
-func escapeMarkdown(s string) string {
-	replacements := []struct {
-		old string
-		new string
-	}{
-		{"#", "\\#"},
-		{"*", "\\*"},
-		{"_", "\\_"},
+// RenderInlineEm applies Markdown emphasis formatting *...*
+// and then uses ANSI styling when enabled by the theme.
+func RenderInlineEm(t Theme, s string) string {
+	if strings.TrimSpace(s) == "" {
+		return s
 	}
+	return styleEm(t, "*"+s+"*")
+}
 
-	for _, r := range replacements {
-		s = strings.ReplaceAll(s, r.old, r.new)
+// RenderInlineCode renders inline code using Markdown backticks
+// and applies subtle ANSI styling when enabled.
+func RenderInlineCode(t Theme, s string) string {
+	if strings.TrimSpace(s) == "" {
+		return s
 	}
-
-	return s
+	return styleCode(t, "`"+s+"`")
 }
