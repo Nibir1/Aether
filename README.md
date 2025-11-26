@@ -279,7 +279,7 @@ if err != nil {
 ## Installation
 
 ```bash
-go get github.com/Nibir1/Aether
+go get github.com/Nibir1/Aether@v1.0.0
 ```
 
 Then import:
