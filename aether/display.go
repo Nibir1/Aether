@@ -10,6 +10,7 @@
 //   • DisplayPlugin routing (strict mode)
 //
 // Internally all heavy logic lives inside internal/display.
+// The Model ↔ Plugin adapter logic lives in adapter.go.
 
 package aether
 
@@ -47,10 +48,6 @@ func (c *Client) RenderMarkdownWithTheme(doc *NormalizedDocument, theme display.
 // ───────────────────────────────────────────────────────────────────────────
 //
 
-// Preview is derived from:
-//   - Title
-//   - Excerpt / summary
-//   - First paragraph (fallback)
 func (c *Client) RenderPreview(doc *NormalizedDocument) string {
 	pr := display.NewPreviewRenderer(display.DefaultTheme())
 	p := pr.MakePreview((*model.Document)(doc))
@@ -112,16 +109,20 @@ func normalizeFormat(f string) string {
 	return strings.ToLower(strings.TrimSpace(f))
 }
 
-// FindDisplayPlugin returns a plugin by format.
+// FindDisplayPlugin returns a display plugin by format ("html", "pdf", "ansi", …).
 func (c *Client) FindDisplayPlugin(format string) (plugins.DisplayPlugin, bool) {
 	if c == nil || c.plugins == nil {
 		return nil, false
 	}
 	p := c.plugins.FindDisplayByFormat(normalizeFormat(format))
-	return p, p != nil
+	if p == nil {
+		return nil, false
+	}
+	return p, true
 }
 
 // ListDisplayFormats lists all registered plugin-provided formats.
+// Example output: []string{"html", "ansi", "pdf"}
 func (c *Client) ListDisplayFormats() []string {
 	if c == nil || c.plugins == nil {
 		return nil
@@ -135,16 +136,16 @@ func (c *Client) ListDisplayFormats() []string {
 // ───────────────────────────────────────────────────────────────────────────
 //
 
-// Render renders a normalized document using either built-in formats
-// or a DisplayPlugin. (Strict Mode)
+// Render renders a normalized document using either a built-in format
+// or a DisplayPlugin. Strict mode (Option B):
 //
 // Built-in formats:
 //   - "markdown", "md"
-//   - "text" (alias of markdown)
 //   - "preview"
+//   - "text" (alias of markdown)
 //
 // All other formats MUST come from DisplayPlugins.
-// If no plugin is found → error.
+// If no plugin exists → error.
 func (c *Client) Render(ctx context.Context, format string, doc *NormalizedDocument) ([]byte, error) {
 	if c == nil {
 		return nil, fmt.Errorf("aether: nil client")
@@ -158,88 +159,38 @@ func (c *Client) Render(ctx context.Context, format string, doc *NormalizedDocum
 	// ───── Built-in formats ────────────────────────────────────────────────
 	switch f {
 	case "markdown", "md", "":
-		return []byte(c.RenderMarkdown(doc)), nil
+		out := c.RenderMarkdown(doc)
+		return []byte(out), nil
 
 	case "text":
-		return []byte(c.RenderMarkdown(doc)), nil
+		out := c.RenderMarkdown(doc)
+		return []byte(out), nil
 
 	case "preview":
-		return []byte(c.RenderPreview(doc)), nil
+		out := c.RenderPreview(doc)
+		return []byte(out), nil
 	}
 
-	// ───── Plugin formats ──────────────────────────────────────────────────
+	// ───── Plugin-required formats (Strict Mode) ───────────────────────────
+	if c.plugins == nil {
+		return nil, fmt.Errorf("aether: no display plugin registry available for format %q", f)
+	}
+
 	p := c.plugins.FindDisplayByFormat(f)
 	if p == nil {
 		return nil, fmt.Errorf("aether: no display plugin registered for format %q", f)
 	}
 
-	pdoc := c.toPluginDocument(doc)
+	// Normalized document is an alias of model.Document; cast to be explicit.
+	pdoc := modelToPluginDocument((*model.Document)(doc))
 	return p.Render(ctx, pdoc)
 }
 
-// RenderSearchResult normalizes a SearchResult then renders it.
+// RenderSearchResult normalizes a SearchResult and passes it to Render().
 func (c *Client) RenderSearchResult(ctx context.Context, format string, sr *SearchResult) ([]byte, error) {
 	if sr == nil {
 		return nil, fmt.Errorf("aether: nil SearchResult")
 	}
 	doc := c.NormalizeSearchResult(sr)
 	return c.Render(ctx, format, doc)
-}
-
-//
-// ───────────────────────────────────────────────────────────────────────────
-//             INTERNAL ADAPTER: model.Document → plugins.Document
-// ───────────────────────────────────────────────────────────────────────────
-//
-
-func (c *Client) toPluginDocument(doc *model.Document) *plugins.Document {
-	if doc == nil {
-		return &plugins.Document{}
-	}
-
-	// The unified adapter is aligned with aether/normalize.go
-	p := &plugins.Document{
-		Source:   "aether-normalized",
-		URL:      doc.SourceURL, // canonical source
-		Title:    doc.Title,
-		Excerpt:  doc.Excerpt,
-		Content:  doc.Content,
-		Kind:     plugins.DocumentKind(doc.Kind),
-		Metadata: map[string]string{},
-		Sections: make([]plugins.Section, 0, len(doc.Sections)),
-	}
-
-	// Copy metadata
-	for k, v := range doc.Metadata {
-		p.Metadata[k] = v
-	}
-
-	// Normalize canonical URL into metadata
-	if doc.SourceURL != "" {
-		p.Metadata["source_url"] = doc.SourceURL
-	}
-
-	// Convert sections
-	for _, s := range doc.Sections {
-		p.Sections = append(p.Sections, plugins.Section{
-			Role:  plugins.SectionRole(s.Role),
-			Title: s.Heading,
-			Text:  s.Text,
-			Meta:  cloneMeta(s.Meta),
-		})
-	}
-
-	return p
-}
-
-// cloneMeta duplicates metadata maps.
-func cloneMeta(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
 }

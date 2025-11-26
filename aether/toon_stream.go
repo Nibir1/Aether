@@ -11,8 +11,7 @@
 //   • token      — individual TOON tokens (text, headings, sections, meta)
 //   • doc_end    — end-of-document marker
 //
-// The stream is line-delimited JSON (JSONL), making it easy to consume
-// from:
+// The stream is line-delimited JSON (JSONL), making it easy to consume:
 //
 //   • CLI tools (e.g., jq, awk, streaming processors)
 //   • LLM/RAG ingestion pipelines
@@ -38,35 +37,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/Nibir1/Aether/internal/model"
 	"github.com/Nibir1/Aether/internal/toon"
 )
-
-// toonStreamEvent represents a single JSONL event in the TOON stream.
-//
-// Event values:
-//   - "doc_start" — top-level document header
-//   - "doc_meta"  — document-level attributes
-//   - "token"     — individual TOON token
-//   - "doc_end"   — end-of-document marker
-type toonStreamEvent struct {
-	Event   string            `json:"event"`          // doc_start, doc_meta, token, doc_end
-	Kind    string            `json:"kind,omitempty"` // document kind (for doc_start)
-	Source  string            `json:"source_url,omitempty"`
-	Title   string            `json:"title,omitempty"`
-	Excerpt string            `json:"excerpt,omitempty"`
-	Attrs   map[string]string `json:"attrs,omitempty"` // document-level TOON attributes (doc_meta)
-	Token   *toonStreamToken  `json:"token,omitempty"` // token payload (for event == "token")
-}
-
-// toonStreamToken is the streamed representation of a single TOON token.
-type toonStreamToken struct {
-	Type     string            `json:"type"`            // underlying token type (e.g. "text", "heading", "section_start", ...)
-	Category string            `json:"category"`        // boundary | content | metadata | other
-	Role     string            `json:"role,omitempty"`  // semantic role (body, entity, feed_item, ...)
-	Text     string            `json:"text,omitempty"`  // text content where applicable
-	Attrs    map[string]string `json:"attrs,omitempty"` // token attributes (e.g. heading, kind, etc.)
-}
 
 //
 // ───────────────────────────────────────────────────────────────────────────
@@ -94,7 +66,8 @@ func (c *Client) StreamTOON(ctx context.Context, w io.Writer, doc *NormalizedDoc
 		return fmt.Errorf("aether: nil document in StreamTOON")
 	}
 
-	tdoc := c.ToTOONFromModel((*toonModelAdapter)(doc).AsModel())
+	// doc is already a *model.Document because NormalizedDocument = model.Document
+	tdoc := c.ToTOONFromModel(doc)
 	return streamTOONDocument(ctx, w, tdoc)
 }
 
@@ -192,6 +165,12 @@ func encodeTOONEvent(ctx context.Context, enc *json.Encoder, ev *toonStreamEvent
 	}
 }
 
+//
+// ───────────────────────────────────────────────────────────────────────────
+//                           TOKEN CATEGORIZATION
+// ───────────────────────────────────────────────────────────────────────────
+//
+
 // categorizeTOONToken maps a raw TOON token into a coarse-grained category
 // used in the streaming representation for easier downstream routing.
 //
@@ -215,18 +194,32 @@ func categorizeTOONToken(t toon.Token) string {
 
 //
 // ───────────────────────────────────────────────────────────────────────────
-//                      ADAPTER FOR NORMALIZEDDOCUMENT
+//                           STREAM EVENT STRUCTURES
 // ───────────────────────────────────────────────────────────────────────────
 //
-// NormalizedDocument is an alias of internal/model.Document, but we avoid
-// importing internal/model here directly again. Instead we use a tiny
-// adapter shim to make the intent explicit and future-proof.
 
-type toonModelAdapter model.Document
+// toonStreamEvent represents a single JSONL event in the TOON stream.
+//
+// Event values:
+//   - "doc_start" — top-level document header
+//   - "doc_meta"  — document-level attributes
+//   - "token"     — individual TOON token
+//   - "doc_end"   — end-of-document marker
+type toonStreamEvent struct {
+	Event   string            `json:"event"`          // doc_start, doc_meta, token, doc_end
+	Kind    string            `json:"kind,omitempty"` // document kind
+	Source  string            `json:"source_url,omitempty"`
+	Title   string            `json:"title,omitempty"`
+	Excerpt string            `json:"excerpt,omitempty"`
+	Attrs   map[string]string `json:"attrs,omitempty"` // document-level TOON attributes
+	Token   *toonStreamToken  `json:"token,omitempty"` // token payload
+}
 
-// AsModel converts the adapter back to *model.Document.
-// This indirection keeps the streaming code clearly separated from
-// the normalization layer, even though the underlying type is identical.
-func (d *toonModelAdapter) AsModel() *model.Document {
-	return (*model.Document)(d)
+// toonStreamToken is the streamed representation of a single TOON token.
+type toonStreamToken struct {
+	Type     string            `json:"type"`            // e.g., "text", "heading", ...
+	Category string            `json:"category"`        // boundary | content | metadata | other
+	Role     string            `json:"role,omitempty"`  // semantic role
+	Text     string            `json:"text,omitempty"`  // text content
+	Attrs    map[string]string `json:"attrs,omitempty"` // token attributes
 }

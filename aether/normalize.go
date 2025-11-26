@@ -1,6 +1,13 @@
 // aether/normalize.go
 //
 // Public normalization wrapper for Aether.
+//
+// This file adapts the public aether.SearchResult into the internal
+// normalize.SearchResult, runs the core normalization pipeline, and then
+// applies any registered TransformPlugins over the resulting
+// internal/model.Document.
+//
+// The Model ↔ Plugin adapter logic lives in adapter.go to avoid duplication.
 
 package aether
 
@@ -11,12 +18,13 @@ import (
 	"github.com/Nibir1/Aether/internal/model"
 	"github.com/Nibir1/Aether/internal/normalize"
 	"github.com/Nibir1/Aether/internal/toon"
-	"github.com/Nibir1/Aether/plugins"
 )
 
 // Alias for public use.
 type NormalizedDocument = model.Document
 
+// NormalizeSearchResult converts a public SearchResult into a canonical
+// normalized Document and applies TransformPlugins (if any).
 func (c *Client) NormalizeSearchResult(sr *SearchResult) *NormalizedDocument {
 	if c == nil {
 		return &model.Document{
@@ -34,19 +42,19 @@ func (c *Client) NormalizeSearchResult(sr *SearchResult) *NormalizedDocument {
 		}
 	}
 
-	// (2) Apply TransformPlugins
+	// (2) Apply TransformPlugins (if registered)
 	finalDoc := c.applyTransformPlugins(doc)
 
 	return finalDoc
 }
 
-// JSON output
+// MarshalSearchResultJSON returns pretty-printed JSON for a SearchResult.
 func (c *Client) MarshalSearchResultJSON(sr *SearchResult) ([]byte, error) {
 	doc := c.NormalizeSearchResult(sr)
 	return json.MarshalIndent(doc, "", "  ")
 }
 
-// TOON output
+// MarshalSearchResultTOON returns pretty-printed TOON JSON for a SearchResult.
 func (c *Client) MarshalSearchResultTOON(sr *SearchResult) ([]byte, error) {
 	doc := c.NormalizeSearchResult(sr)
 	tdoc := toon.FromModel(doc)
@@ -59,6 +67,7 @@ func (c *Client) MarshalSearchResultTOON(sr *SearchResult) ([]byte, error) {
 // ─────────────────────────────────────────────
 //
 
+// convertSearchResult adapts aether.SearchResult into normalize.SearchResult.
 func convertSearchResult(in *SearchResult) *normalize.SearchResult {
 	if in == nil {
 		return nil
@@ -68,9 +77,13 @@ func convertSearchResult(in *SearchResult) *normalize.SearchResult {
 		PrimaryDocument: convertPrimaryDocument(in.PrimaryDocument),
 		Article:         convertArticle(in.Article),
 		Feed:            convertFeed(in.Feed),
+
+		// Only plan intent exists in the public API
 		Plan: normalize.NormalizePlan{
 			Intent: string(in.Plan.Intent),
 		},
+
+		// No entities here because aether.SearchResult has none (yet).
 	}
 }
 
@@ -123,116 +136,16 @@ func convertFeed(in *Feed) *normalize.Feed {
 
 //
 // ─────────────────────────────────────────────
-//     ADAPTER: model.Document → plugins.Document
+//         TRANSFORM PLUGIN EXECUTION PIPELINE
 // ─────────────────────────────────────────────
 //
 
-func convertModelToPluginDocument(doc *model.Document) *plugins.Document {
-	if doc == nil {
-		return nil
-	}
-
-	// The *canonical* correct URL for plugins is SourceURL.
-	out := &plugins.Document{
-		Source:   "aether-normalized",
-		URL:      doc.SourceURL, // ← FIXED HERE
-		Kind:     plugins.DocumentKind(doc.Kind),
-		Title:    doc.Title,
-		Excerpt:  doc.Excerpt,
-		Content:  doc.Content,
-		Metadata: cloneStringMap(doc.Metadata),
-	}
-
-	// Normalize URL inside metadata for plugin compatibility
-	if doc.SourceURL != "" {
-		out.Metadata["source_url"] = doc.SourceURL
-	}
-
-	// Convert sections
-	for _, s := range doc.Sections {
-		out.Sections = append(out.Sections, plugins.Section{
-			Role:  plugins.SectionRole(s.Role),
-			Title: s.Heading,
-			Text:  s.Text,
-			Meta:  cloneStringMap(s.Meta),
-		})
-	}
-
-	return out
-}
-
+// applyTransformPlugins runs registered TransformPlugins in registration order.
 //
-// ─────────────────────────────────────────────
-//     ADAPTER: plugins.Document → model.Document
-// ─────────────────────────────────────────────
-//
-
-func convertPluginDocToModel(pdoc *plugins.Document) *model.Document {
-	if pdoc == nil {
-		return nil
-	}
-
-	out := &model.Document{
-		Kind:     model.DocumentKind(pdoc.Kind),
-		Title:    pdoc.Title,
-		Excerpt:  pdoc.Excerpt,
-		Content:  pdoc.Content,
-		Metadata: cloneStringMap(pdoc.Metadata),
-	}
-
-	// Preferred: explicit URL field in plugin Document
-	if pdoc.URL != "" {
-		out.SourceURL = pdoc.URL
-	}
-
-	// Fallback: metadata URL
-	if out.SourceURL == "" {
-		if metaURL := out.Metadata["url"]; metaURL != "" {
-			out.SourceURL = metaURL
-		}
-	}
-
-	// Normalize fields for consistency
-	if out.SourceURL != "" {
-		out.Metadata["source_url"] = out.SourceURL
-	}
-
-	// Convert sections
-	for _, s := range pdoc.Sections {
-		out.Sections = append(out.Sections, model.Section{
-			Role:    model.SectionRole(s.Role),
-			Heading: s.Title,
-			Text:    s.Text,
-			Meta:    cloneStringMap(s.Meta),
-		})
-	}
-
-	return out
-}
-
-//
-// ─────────────────────────────────────────────
-//                     HELPERS
-// ─────────────────────────────────────────────
-//
-
-func cloneStringMap(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
-}
-
-//
-// ─────────────────────────────────────────────
-//           TRANSFORM PLUGIN EXECUTION
-// ─────────────────────────────────────────────
-//
-
+// It converts model.Document ↔ plugins.Document using the unified adapter
+// helpers in adapter.go. Failures in individual plugins are logged by the
+// caller (in future) but do not abort the pipeline: a failing plugin is
+// simply skipped.
 func (c *Client) applyTransformPlugins(doc *model.Document) *model.Document {
 	if c == nil || c.plugins == nil || doc == nil {
 		return doc
@@ -240,7 +153,7 @@ func (c *Client) applyTransformPlugins(doc *model.Document) *model.Document {
 
 	names := c.plugins.ListTransforms()
 	if len(names) == 0 {
-		return doc
+		return doc // no transforms registered
 	}
 
 	current := doc
@@ -251,13 +164,18 @@ func (c *Client) applyTransformPlugins(doc *model.Document) *model.Document {
 			continue
 		}
 
-		pdoc := convertModelToPluginDocument(current)
+		// Convert model.Document → plugins.Document
+		pdoc := modelToPluginDocument(current)
+
+		// Execute transform plugin
 		out, err := p.Apply(context.Background(), pdoc)
 		if err != nil || out == nil {
+			// Skip failing plugin but keep the rest of the pipeline.
 			continue
 		}
 
-		next := convertPluginDocToModel(out)
+		// Convert plugins.Document → model.Document
+		next := pluginToModelDocument(out)
 		if next != nil {
 			current = next
 		}
