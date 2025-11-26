@@ -18,11 +18,11 @@ type ErrorKind = internal.Kind
 // These allow callers to distinguish between failure modes such as
 // configuration errors, HTTP errors or robots.txt violations.
 const (
-	ErrorKindUnknown internal.Kind = internal.KindUnknown
-	ErrorKindConfig  internal.Kind = internal.KindConfig
-	ErrorKindHTTP    internal.Kind = internal.KindHTTP
-	ErrorKindRobots  internal.Kind = internal.KindRobots
-	ErrorKindParsing internal.Kind = internal.KindParsing
+	ErrorKindUnknown ErrorKind = internal.KindUnknown
+	ErrorKindConfig  ErrorKind = internal.KindConfig
+	ErrorKindHTTP    ErrorKind = internal.KindHTTP
+	ErrorKindRobots  ErrorKind = internal.KindRobots
+	ErrorKindParsing ErrorKind = internal.KindParsing
 )
 
 // Error is Aether's structured error type, re-exported for public use.
