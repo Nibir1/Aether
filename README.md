@@ -1048,7 +1048,7 @@ Ideas, issues, and PRs are welcome:
 <div align="center">
 Aether is a legal, robots.txt-compliant, open‑data retrieval and normalization toolkit 
 <br />
-Built for LLM / RAG / agentic AI Systems
+- Built for LLM / RAG / Agentic AI Systems -
 <br />
 <a href="https://github.com/Nibir1/Helix/issues">🐞 Report Bug</a> ·
 <a href="https://github.com/Nibir1/Helix/issues">💡 Request Feature</a> ·
