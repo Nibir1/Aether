@@ -3,11 +3,11 @@
 // Public wrappers around Aether’s display subsystem.
 //
 // This file exposes a stable API for:
-//   • Markdown rendering
-//   • Preview rendering
-//   • Table rendering
+//   • Markdown rendering (built-in)
+//   • Preview rendering (built-in)
+//   • Table rendering (built-in)
 //   • Theme selection
-//   • DisplayPlugin routing (Stage 2)
+//   • DisplayPlugin routing (strict mode)
 //
 // Internally all heavy logic lives inside internal/display.
 
@@ -16,6 +16,7 @@ package aether
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Nibir1/Aether/internal/display"
 	"github.com/Nibir1/Aether/internal/model"
@@ -45,11 +46,6 @@ func (c *Client) RenderMarkdownWithTheme(doc *NormalizedDocument, theme display.
 //                               PREVIEW RENDERING
 // ───────────────────────────────────────────────────────────────────────────
 //
-
-// Previews are short summaries containing:
-//   • Title
-//   • Excerpt / summary
-//   • First paragraph fallback
 
 func (c *Client) RenderPreview(doc *NormalizedDocument) string {
 	pr := display.NewPreviewRenderer(display.DefaultTheme())
@@ -103,25 +99,24 @@ func (c *Client) ToNormalized(sr *SearchResult) *model.Document {
 
 //
 // ───────────────────────────────────────────────────────────────────────────
-//                     DISPLAY PLUGIN ROUTING (NEW — STEP 2)
+//                     DISPLAY PLUGIN ROUTING (STRICT — OPTION B)
 // ───────────────────────────────────────────────────────────────────────────
 //
 
-// GetDisplayPlugin returns a display plugin that supports a given format tag.
-// Example: GetDisplayPlugin("html"), GetDisplayPlugin("pdf").
-func (c *Client) GetDisplayPlugin(format string) (plugins.DisplayPlugin, bool) {
+// normalizeFormat ensures format matching is case-insensitive.
+func normalizeFormat(f string) string {
+	return strings.ToLower(strings.TrimSpace(f))
+}
+
+// FindDisplayPlugin returns a plugin by format ("html", "pdf", "ansi"…).
+func (c *Client) FindDisplayPlugin(format string) (plugins.DisplayPlugin, bool) {
 	if c == nil || c.plugins == nil {
 		return nil, false
 	}
-	p := c.plugins.FindDisplayByFormat(format)
-	if p == nil {
-		return nil, false
-	}
-	return p, true
+	return c.plugins.FindDisplayByFormat(normalizeFormat(format)), true
 }
 
-// ListDisplayFormats returns all registered display formats.
-// Example output: []string{"html", "ansi", "pdf"}
+// ListDisplayFormats lists all registered plugin-provided formats.
 func (c *Client) ListDisplayFormats() []string {
 	if c == nil || c.plugins == nil {
 		return nil
@@ -129,9 +124,23 @@ func (c *Client) ListDisplayFormats() []string {
 	return c.plugins.ListDisplayFormats()
 }
 
-// RenderWithPlugin renders a normalized document using a DisplayPlugin.
-// The plugin determines the output format (text, html, pdf, ansi, etc.).
-func (c *Client) RenderWithPlugin(ctx context.Context, format string, doc *NormalizedDocument) ([]byte, error) {
+//
+// ───────────────────────────────────────────────────────────────────────────
+//                   UNIFIED RENDER DISPATCHER (BUILT-IN + PLUGIN)
+// ───────────────────────────────────────────────────────────────────────────
+//
+
+// Render renders a normalized document using either a built-in format
+// or a DisplayPlugin. Strict mode (Option B):
+//
+// Built-in formats:
+//   - "markdown", "md"
+//   - "preview"
+//   - "text" (alias of markdown)
+//
+// All other formats MUST come from DisplayPlugins.
+// If no plugin exists → error.
+func (c *Client) Render(ctx context.Context, format string, doc *NormalizedDocument) ([]byte, error) {
 	if c == nil {
 		return nil, fmt.Errorf("aether: nil client")
 	}
@@ -139,23 +148,40 @@ func (c *Client) RenderWithPlugin(ctx context.Context, format string, doc *Norma
 		return nil, fmt.Errorf("aether: nil document")
 	}
 
-	p, ok := c.GetDisplayPlugin(format)
-	if !ok {
-		return nil, fmt.Errorf("aether: no display plugin for format %q", format)
+	f := normalizeFormat(format)
+
+	// ───── Built-in formats ────────────────────────────────────────────────
+	switch f {
+	case "markdown", "md", "":
+		out := c.RenderMarkdown(doc)
+		return []byte(out), nil
+
+	case "text":
+		out := c.RenderMarkdown(doc)
+		return []byte(out), nil
+
+	case "preview":
+		out := c.RenderPreview(doc)
+		return []byte(out), nil
 	}
 
-	// Convert normalized → plugin.Document
+	// ───── Plugin-required formats (Strict Mode) ───────────────────────────
+	p := c.plugins.FindDisplayByFormat(f)
+	if p == nil {
+		return nil, fmt.Errorf("aether: no display plugin registered for format %q", f)
+	}
+
 	pdoc := c.toPluginDocument(doc)
 	return p.Render(ctx, pdoc)
 }
 
-// RenderSearchResultWithPlugin normalizes a SearchResult and renders it using a plugin.
-func (c *Client) RenderSearchResultWithPlugin(ctx context.Context, format string, sr *SearchResult) ([]byte, error) {
+// RenderSearchResult normalizes a SearchResult and passes it to Render().
+func (c *Client) RenderSearchResult(ctx context.Context, format string, sr *SearchResult) ([]byte, error) {
 	if sr == nil {
 		return nil, fmt.Errorf("aether: nil SearchResult")
 	}
 	doc := c.NormalizeSearchResult(sr)
-	return c.RenderWithPlugin(ctx, format, doc)
+	return c.Render(ctx, format, doc)
 }
 
 //
@@ -164,14 +190,11 @@ func (c *Client) RenderSearchResultWithPlugin(ctx context.Context, format string
 // ───────────────────────────────────────────────────────────────────────────
 //
 
-// toPluginDocument converts a normalized model.Document into a plugins.Document
-// so DisplayPlugins can render a stable public structure.
 func (c *Client) toPluginDocument(doc *model.Document) *plugins.Document {
 	if doc == nil {
 		return &plugins.Document{}
 	}
 
-	// Convert top-level fields
 	p := &plugins.Document{
 		Source:   "aether-normalized",
 		URL:      doc.SourceURL,
@@ -183,12 +206,10 @@ func (c *Client) toPluginDocument(doc *model.Document) *plugins.Document {
 		Sections: make([]plugins.Section, 0, len(doc.Sections)),
 	}
 
-	// Copy metadata
 	for k, v := range doc.Metadata {
 		p.Metadata[k] = v
 	}
 
-	// Convert sections
 	for _, s := range doc.Sections {
 		p.Sections = append(p.Sections, plugins.Section{
 			Role:  plugins.SectionRole(s.Role),
