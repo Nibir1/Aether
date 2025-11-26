@@ -47,6 +47,10 @@ func (c *Client) RenderMarkdownWithTheme(doc *NormalizedDocument, theme display.
 // ───────────────────────────────────────────────────────────────────────────
 //
 
+// Preview is derived from:
+//   - Title
+//   - Excerpt / summary
+//   - First paragraph (fallback)
 func (c *Client) RenderPreview(doc *NormalizedDocument) string {
 	pr := display.NewPreviewRenderer(display.DefaultTheme())
 	p := pr.MakePreview((*model.Document)(doc))
@@ -108,12 +112,13 @@ func normalizeFormat(f string) string {
 	return strings.ToLower(strings.TrimSpace(f))
 }
 
-// FindDisplayPlugin returns a plugin by format ("html", "pdf", "ansi"…).
+// FindDisplayPlugin returns a plugin by format.
 func (c *Client) FindDisplayPlugin(format string) (plugins.DisplayPlugin, bool) {
 	if c == nil || c.plugins == nil {
 		return nil, false
 	}
-	return c.plugins.FindDisplayByFormat(normalizeFormat(format)), true
+	p := c.plugins.FindDisplayByFormat(normalizeFormat(format))
+	return p, p != nil
 }
 
 // ListDisplayFormats lists all registered plugin-provided formats.
@@ -130,16 +135,16 @@ func (c *Client) ListDisplayFormats() []string {
 // ───────────────────────────────────────────────────────────────────────────
 //
 
-// Render renders a normalized document using either a built-in format
-// or a DisplayPlugin. Strict mode (Option B):
+// Render renders a normalized document using either built-in formats
+// or a DisplayPlugin. (Strict Mode)
 //
 // Built-in formats:
 //   - "markdown", "md"
-//   - "preview"
 //   - "text" (alias of markdown)
+//   - "preview"
 //
 // All other formats MUST come from DisplayPlugins.
-// If no plugin exists → error.
+// If no plugin is found → error.
 func (c *Client) Render(ctx context.Context, format string, doc *NormalizedDocument) ([]byte, error) {
 	if c == nil {
 		return nil, fmt.Errorf("aether: nil client")
@@ -153,19 +158,16 @@ func (c *Client) Render(ctx context.Context, format string, doc *NormalizedDocum
 	// ───── Built-in formats ────────────────────────────────────────────────
 	switch f {
 	case "markdown", "md", "":
-		out := c.RenderMarkdown(doc)
-		return []byte(out), nil
+		return []byte(c.RenderMarkdown(doc)), nil
 
 	case "text":
-		out := c.RenderMarkdown(doc)
-		return []byte(out), nil
+		return []byte(c.RenderMarkdown(doc)), nil
 
 	case "preview":
-		out := c.RenderPreview(doc)
-		return []byte(out), nil
+		return []byte(c.RenderPreview(doc)), nil
 	}
 
-	// ───── Plugin-required formats (Strict Mode) ───────────────────────────
+	// ───── Plugin formats ──────────────────────────────────────────────────
 	p := c.plugins.FindDisplayByFormat(f)
 	if p == nil {
 		return nil, fmt.Errorf("aether: no display plugin registered for format %q", f)
@@ -175,7 +177,7 @@ func (c *Client) Render(ctx context.Context, format string, doc *NormalizedDocum
 	return p.Render(ctx, pdoc)
 }
 
-// RenderSearchResult normalizes a SearchResult and passes it to Render().
+// RenderSearchResult normalizes a SearchResult then renders it.
 func (c *Client) RenderSearchResult(ctx context.Context, format string, sr *SearchResult) ([]byte, error) {
 	if sr == nil {
 		return nil, fmt.Errorf("aether: nil SearchResult")
@@ -195,9 +197,10 @@ func (c *Client) toPluginDocument(doc *model.Document) *plugins.Document {
 		return &plugins.Document{}
 	}
 
+	// The unified adapter is aligned with aether/normalize.go
 	p := &plugins.Document{
 		Source:   "aether-normalized",
-		URL:      doc.SourceURL,
+		URL:      doc.SourceURL, // canonical source
 		Title:    doc.Title,
 		Excerpt:  doc.Excerpt,
 		Content:  doc.Content,
@@ -206,10 +209,17 @@ func (c *Client) toPluginDocument(doc *model.Document) *plugins.Document {
 		Sections: make([]plugins.Section, 0, len(doc.Sections)),
 	}
 
+	// Copy metadata
 	for k, v := range doc.Metadata {
 		p.Metadata[k] = v
 	}
 
+	// Normalize canonical URL into metadata
+	if doc.SourceURL != "" {
+		p.Metadata["source_url"] = doc.SourceURL
+	}
+
+	// Convert sections
 	for _, s := range doc.Sections {
 		p.Sections = append(p.Sections, plugins.Section{
 			Role:  plugins.SectionRole(s.Role),
@@ -222,6 +232,7 @@ func (c *Client) toPluginDocument(doc *model.Document) *plugins.Document {
 	return p
 }
 
+// cloneMeta duplicates metadata maps.
 func cloneMeta(m map[string]string) map[string]string {
 	if m == nil {
 		return nil
