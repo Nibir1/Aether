@@ -25,6 +25,7 @@ package plugins
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -196,13 +197,59 @@ func (r *Registry) ListDisplays() []string {
 
 //
 // ─────────────────────────────────────────────
+//     NEW (STEP 2): DISPLAY FORMAT LOOKUP
+// ─────────────────────────────────────────────
+//
+// FindDisplayByFormat finds the first registered display plugin
+// whose Format() matches the requested format tag.
+// Comparison is case-insensitive.
+//
+// Example:
+//   FindDisplayByFormat("html")
+//   FindDisplayByFormat("PDF")
+
+func (r *Registry) FindDisplayByFormat(format string) DisplayPlugin {
+	if format == "" {
+		return nil
+	}
+	target := strings.ToLower(strings.TrimSpace(format))
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, p := range r.displays {
+		if strings.ToLower(strings.TrimSpace(p.Format())) == target {
+			return p
+		}
+	}
+	return nil
+}
+
+// ListDisplayFormats returns all supported display formats
+// deduplicated and lexicographically sorted.
+func (r *Registry) ListDisplayFormats() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]string, 0, len(r.displays))
+	for _, p := range r.displays {
+		fmt := strings.ToLower(strings.TrimSpace(p.Format()))
+		if fmt != "" {
+			out = append(out, fmt)
+		}
+	}
+	sortStrings(out)
+	return out
+}
+
+//
+// ─────────────────────────────────────────────
 //                 UTILITIES
 // ─────────────────────────────────────────────
 //
 
 // sortStrings performs an in-place lexicographic sort.
-// We cannot import "sort" here because it would be unnecessary overhead,
-// and implementing a tiny insertion sort keeps this minimal and predictable.
+// Tiny insertion sort keeps this dependency-free and efficient.
 func sortStrings(s []string) {
 	n := len(s)
 	for i := 1; i < n; i++ {
