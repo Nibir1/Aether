@@ -1,3 +1,5 @@
+// cmd/test_crawl/main.go
+
 package main
 
 import (
@@ -20,13 +22,16 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	fmt.Println("=== Test 8: Crawl ===")
+	fmt.Println("=== Test : Crawl ===")
 
-	startURL := "https://example.com/"
+	startURL := "https://books.toscrape.com/"
 
+	// Crawl visitor callback
 	visitor := aether.CrawlVisitorFunc(func(ctx context.Context, p *aether.CrawledPage) error {
-		fmt.Printf("Visited: %s (depth=%d, status=%d, links=%d)\n",
-			p.URL, p.Depth, p.StatusCode, len(p.Links))
+		fmt.Printf(
+			"Visited: %s (depth=%d, status=%d, links=%d)\n",
+			p.URL, p.Depth, p.StatusCode, len(p.Links),
+		)
 		return nil
 	})
 
@@ -34,7 +39,8 @@ func main() {
 		MaxDepth:     1,
 		MaxPages:     5,
 		SameHostOnly: true,
-		FetchDelay:   1 * time.Second,
+		FetchDelay:   1 * time.Second, // throttle per-host
+		Concurrency:  1,               // conservative for example.com
 		Visitor:      visitor,
 	}
 

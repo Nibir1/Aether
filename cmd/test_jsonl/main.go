@@ -1,3 +1,5 @@
+// cmd/test_jsonl/main.go
+
 package main
 
 import (
@@ -21,7 +23,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	fmt.Println("=== Test 5: JSONL Streaming ===")
+	fmt.Println("=== Test: JSONL Streaming ===")
 
 	query := "Finland"
 	fmt.Println("Search query:", query)
@@ -48,6 +50,9 @@ func main() {
 		log.Fatalf("StreamNormalizedJSONL error: %v", err)
 	}
 
+	// ------------------------------------------------------------
+	// 2. StreamSearchResultJSONL
+	// ------------------------------------------------------------
 	fmt.Println("\n-> StreamSearchResultJSONL (SearchResult → JSONL):")
 	err = cli.StreamSearchResultJSONL(context.Background(), os.Stdout, sr)
 	if err != nil {
@@ -55,7 +60,7 @@ func main() {
 	}
 
 	// ------------------------------------------------------------
-	// 2. OPTIONAL: If SR includes a Feed, test StreamFeedJSONL
+	// 3. Stream feed items (if present)
 	// ------------------------------------------------------------
 	if sr.Feed != nil && len(sr.Feed.Items) > 0 {
 		fmt.Println("\n-> StreamFeedJSONL (Raw feed items):")

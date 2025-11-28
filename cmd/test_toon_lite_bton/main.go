@@ -1,3 +1,11 @@
+// cmd/test_toon_lite_bton/main.go
+//
+// Test: TOON Lite JSON + Pretty JSON + BT0N binary serialization.
+//
+// This test performs a search, normalizes the SearchResult, and then
+// serializes it using TOON Lite (compact + pretty) and BT0N formats.
+// A round-trip decode of BT0N is also performed to validate integrity.
+
 package main
 
 import (
@@ -12,9 +20,37 @@ import (
 )
 
 func main() {
-	cli, err := aether.NewClient(
-		aether.WithDebugLogging(false),
-	)
+	fmt.Println("====================================================")
+	fmt.Println("TEST: TOON Lite + BTON — NORMAL MODE (robots ON)")
+	fmt.Println("====================================================")
+
+	runTOONLiteBTONTest(false)
+
+	fmt.Println("\n====================================================")
+	fmt.Println("TEST: TOON Lite + BTON — ROBOTS OVERRIDE ENABLED")
+	fmt.Println("====================================================")
+
+	runTOONLiteBTONTest(true)
+}
+
+func runTOONLiteBTONTest(override bool) {
+	// -----------------------------
+	// Create Aether client
+	// -----------------------------
+	var cli *aether.Client
+	var err error
+
+	if override {
+		cli, err = aether.NewClient(
+			aether.WithDebugLogging(true),
+			aether.WithRobotsOverride("hnrss.org", "news.ycombinator.com"),
+		)
+	} else {
+		cli, err = aether.NewClient(
+			aether.WithDebugLogging(true),
+		)
+	}
+
 	if err != nil {
 		log.Fatalf("failed to create Aether client: %v", err)
 	}
@@ -22,28 +58,30 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	fmt.Println("=== Test 10: TOON Lite + BTON ===")
-
 	query := "Finland"
 	fmt.Println("Search query:", query)
 	fmt.Println()
 
-	// Perform search
+	// -----------------------------
+	// 1) Perform Search
+	// -----------------------------
 	sr, err := cli.Search(ctx, query)
 	if err != nil {
 		log.Fatalf("Search error: %v", err)
 	}
 
-	// Normalize first (good practice)
+	// -----------------------------
+	// 2) Normalize SearchResult
+	// -----------------------------
 	norm := cli.NormalizeSearchResult(sr)
 	if norm == nil {
 		log.Fatalf("NormalizeSearchResult returned nil")
 	}
 
 	// -------------------------------------------------------------------------
-	// 1. TOON Lite (compact)
+	// 3) TOON Lite (compact)
 	// -------------------------------------------------------------------------
-	fmt.Println("\n-> MarshalTOONLite (compact):")
+	fmt.Println("-> MarshalTOONLite (compact):")
 	tlite, err := cli.MarshalTOONLite(sr)
 	if err != nil {
 		log.Fatalf("MarshalTOONLite error: %v", err)
@@ -51,7 +89,7 @@ func main() {
 	fmt.Println(string(tlite))
 
 	// -------------------------------------------------------------------------
-	// 2. TOON Lite Pretty
+	// 4) TOON Lite Pretty
 	// -------------------------------------------------------------------------
 	fmt.Println("\n-> MarshalTOONLitePretty (pretty JSON):")
 	tlitePretty, err := cli.MarshalTOONLitePretty(sr)
@@ -61,7 +99,7 @@ func main() {
 	fmt.Println(string(tlitePretty))
 
 	// -------------------------------------------------------------------------
-	// 3. BTON encoding
+	// 5) BT0N encoding
 	// -------------------------------------------------------------------------
 	fmt.Println("\n-> MarshalBTON (binary TOON):")
 	btonBytes, err := cli.MarshalBTON(sr)
@@ -72,12 +110,12 @@ func main() {
 		len(btonBytes),
 		hex.Dump(btonBytes))
 
-	// Optionally write BTON to disk
+	// Optionally write BT0N to disk
 	_ = os.WriteFile("test_output.bton", btonBytes, 0644)
 	fmt.Println("Saved to test_output.bton")
 
 	// -------------------------------------------------------------------------
-	// 4. BTON decode round-trip test
+	// 6) BT0N decode round-trip test
 	// -------------------------------------------------------------------------
 	fmt.Println("\n-> UnmarshalBTON (decode round-trip):")
 	decoded, err := cli.UnmarshalBTON(btonBytes)
@@ -90,4 +128,5 @@ func main() {
 	fmt.Printf("Title: %s\n", decoded.Title)
 	fmt.Printf("Excerpt: %s\n", decoded.Excerpt)
 	fmt.Printf("Tokens: %d tokens\n", len(decoded.Tokens))
+	fmt.Println()
 }

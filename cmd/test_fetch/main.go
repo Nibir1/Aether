@@ -1,3 +1,5 @@
+// cmd/test_fetch/main.go
+
 package main
 
 import (
@@ -21,22 +23,25 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	url := "https://example.com/"
+	url := "https://books.toscrape.com/"
 
-	fmt.Println("=== Test 1: Fetch + Detect + ParseHTML + ExtractArticle ===")
+	fmt.Println("=== Test: Fetch + Detect + ParseHTML + ExtractArticle ===")
 	fmt.Println("URL:", url)
 	fmt.Println()
 
+	// ---------------------------------------------------------
 	// 1) Fetch
+	// ---------------------------------------------------------
 	res, err := cli.Fetch(ctx, url)
 	if err != nil {
 		log.Fatalf("Fetch error: %v", err)
 	}
 	fmt.Printf("Fetch status: %d\n", res.StatusCode)
-	fmt.Printf("Body length: %d bytes\n", len(res.Body))
-	fmt.Println()
+	fmt.Printf("Body length: %d bytes\n\n", len(res.Body))
 
+	// ---------------------------------------------------------
 	// 2) Detect
+	// ---------------------------------------------------------
 	det, err := cli.Detect(ctx, url)
 	if err != nil {
 		log.Fatalf("Detect error: %v", err)
@@ -46,10 +51,11 @@ func main() {
 	fmt.Printf("  Charset:  %s\n", det.Charset)
 	fmt.Printf("  Encoding: %s\n", det.Encoding)
 	fmt.Printf("  IsBinary: %v\n", det.IsBinary)
-	fmt.Printf("  Title:    %s\n", det.Title)
-	fmt.Println()
+	fmt.Printf("  Title:    %s\n\n", det.Title)
 
+	// ---------------------------------------------------------
 	// 3) ParseHTML
+	// ---------------------------------------------------------
 	parsed, err := cli.ParseHTML(res.Body)
 	if err != nil {
 		log.Fatalf("ParseHTML error: %v", err)
@@ -60,18 +66,21 @@ func main() {
 		fmt.Printf("  First heading: [h%d] %s\n", parsed.Headings[0].Level, parsed.Headings[0].Text)
 	}
 	fmt.Printf("  Paragraphs: %d\n", len(parsed.Paragraphs))
-	fmt.Printf("  Links:      %d\n", len(parsed.Links))
-	fmt.Println()
+	fmt.Printf("  Links:      %d\n\n", len(parsed.Links))
 
-	// 4) ExtractArticle
+	// ---------------------------------------------------------
+	// 4) ExtractArticle (from URL)
+	// ---------------------------------------------------------
 	article, err := cli.ExtractArticle(ctx, url)
 	if err != nil {
 		log.Fatalf("ExtractArticle error: %v", err)
 	}
+
 	fmt.Println("Extracted Article:")
 	fmt.Printf("  Title:   %s\n", article.Title)
 	fmt.Printf("  Byline:  %s\n", article.Byline)
 	fmt.Printf("  Excerpt: %s\n", article.Excerpt)
+
 	if len(article.Content) > 200 {
 		fmt.Printf("  Content (first 200 chars): %s\n", article.Content[:200])
 	} else {

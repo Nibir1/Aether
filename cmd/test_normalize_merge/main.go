@@ -1,3 +1,5 @@
+// cmd/test_normalize_merge/main.go
+
 package main
 
 import (
@@ -13,9 +15,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Construct a fake SearchResult with all three layers
+	// Construct a fake SearchResult with all three layers.
+	// This tests the merging logic inside NormalizeSearchResult().
 	sr := &aether.SearchResult{
-		Plan: aether.SearchPlan{Intent: "test"},
+		Plan: aether.SearchPlan{
+			Intent: aether.SearchIntent("test"),
+		},
+
 		PrimaryDocument: &aether.SearchDocument{
 			URL:     "https://example.com",
 			Title:   "Base Title",
@@ -26,6 +32,7 @@ func main() {
 			},
 			Kind: aether.SearchDocumentKindHTML,
 		},
+
 		Article: &aether.Article{
 			Title:   "Article Title",
 			Content: "Article Body Content",
@@ -33,6 +40,7 @@ func main() {
 				"article_meta": "yes",
 			},
 		},
+
 		Feed: &aether.Feed{
 			Items: []aether.FeedItem{
 				{
@@ -43,6 +51,7 @@ func main() {
 		},
 	}
 
+	// Normalize the combined structure.
 	norm := cli.NormalizeSearchResult(sr)
 
 	fmt.Println("\n=== Normalized Merge Test ===")

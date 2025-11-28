@@ -1,3 +1,5 @@
+// cmd/test_search_display/main.go
+
 package main
 
 import (
@@ -10,17 +12,53 @@ import (
 )
 
 func main() {
-	cli, err := aether.NewClient(
-		aether.WithDebugLogging(true),
-	)
+
+	// =====================================================================
+	// A) NORMAL MODE — robots.txt respected
+	// =====================================================================
+	fmt.Println("====================================================")
+	fmt.Println("A) SEARCH + DISPLAY TEST — ROBOTS.TXT MODE (DEFAULT)")
+	fmt.Println("====================================================")
+	fmt.Println()
+	fmt.Println(">>> Running test suite for: NORMAL MODE (robots ON)")
+	fmt.Println()
+	runSearchDisplayTest(false)
+
+	// =====================================================================
+	// B) OVERRIDE MODE — allow Hacker News (for example)
+	// =====================================================================
+	fmt.Println("====================================================")
+	fmt.Println("B) SEARCH + DISPLAY TEST — ROBOTS OVERRIDE ENABLED")
+	fmt.Println("====================================================")
+	fmt.Println()
+	fmt.Println(">>> Running test suite for: ROBOTS OVERRIDE MODE")
+	fmt.Println()
+	runSearchDisplayTest(true)
+}
+
+func runSearchDisplayTest(override bool) {
+
+	var cli *aether.Client
+	var err error
+
+	if override {
+		cli, err = aether.NewClient(
+			aether.WithDebugLogging(true),
+			// Example: allow known sources for override
+			aether.WithRobotsOverride("news.ycombinator.com", "hnrss.org"),
+		)
+	} else {
+		cli, err = aether.NewClient(
+			aether.WithDebugLogging(true),
+		)
+	}
+
 	if err != nil {
 		log.Fatalf("failed to create Aether client: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-
-	fmt.Println("=== Test 4: Search + Normalize + Display + TOON ===")
 
 	query := "Finland"
 	fmt.Println("Query:", query)
@@ -29,13 +67,16 @@ func main() {
 	// 1) Search
 	sr, err := cli.Search(ctx, query)
 	if err != nil {
-		log.Fatalf("Search error: %v", err)
+		log.Printf("Search error: %v\n", err)
+		return
 	}
 
 	fmt.Println("Search Plan:")
 	fmt.Printf("  Intent: %s\n", sr.Plan.Intent)
 	fmt.Printf("  Source: %s\n", sr.Plan.Source)
-	fmt.Printf("  URL:    %s\n", sr.PrimaryDocument.URL)
+	if sr.PrimaryDocument != nil {
+		fmt.Printf("  URL:    %s\n", sr.PrimaryDocument.URL)
+	}
 	fmt.Println()
 
 	// 2) Normalize
@@ -49,46 +90,51 @@ func main() {
 	// 3) Render (markdown + preview)
 	md, err := cli.Render(context.Background(), "markdown", norm)
 	if err != nil {
-		log.Fatalf("Render(markdown) error: %v", err)
-	}
-	fmt.Println("Rendered Markdown (first 400 chars):")
-	if len(md) > 400 {
-		fmt.Println(string(md[:400]))
+		log.Printf("Render(markdown) error: %v\n", err)
 	} else {
-		fmt.Println(string(md))
+		fmt.Println("Rendered Markdown (first 400 chars):")
+		if len(md) > 400 {
+			fmt.Println(string(md[:400]))
+		} else {
+			fmt.Println(string(md))
+		}
+		fmt.Println()
 	}
-	fmt.Println()
 
 	preview, err := cli.Render(context.Background(), "preview", norm)
 	if err != nil {
-		log.Fatalf("Render(preview) error: %v", err)
+		log.Printf("Render(preview) error: %v\n", err)
+	} else {
+		fmt.Println("Rendered Preview:")
+		fmt.Println(string(preview))
+		fmt.Println()
 	}
-	fmt.Println("Rendered Preview:")
-	fmt.Println(string(preview))
-	fmt.Println()
 
 	// 4) JSON normalization output
 	jsonBytes, err := cli.MarshalSearchResultJSON(sr)
 	if err != nil {
-		log.Fatalf("MarshalSearchResultJSON error: %v", err)
-	}
-	fmt.Println("JSON (first 400 chars):")
-	if len(jsonBytes) > 400 {
-		fmt.Println(string(jsonBytes[:400]))
+		log.Printf("MarshalSearchResultJSON error: %v\n", err)
 	} else {
-		fmt.Println(string(jsonBytes))
+		fmt.Println("JSON (first 400 chars):")
+		if len(jsonBytes) > 400 {
+			fmt.Println(string(jsonBytes[:400]))
+		} else {
+			fmt.Println(string(jsonBytes))
+		}
+		fmt.Println()
 	}
-	fmt.Println()
 
 	// 5) TOON JSON
 	toonBytes, err := cli.MarshalSearchResultTOON(sr)
 	if err != nil {
-		log.Fatalf("MarshalSearchResultTOON error: %v", err)
-	}
-	fmt.Println("TOON JSON (first 400 chars):")
-	if len(toonBytes) > 400 {
-		fmt.Println(string(toonBytes[:400]))
+		log.Printf("MarshalSearchResultTOON error: %v\n", err)
 	} else {
-		fmt.Println(string(toonBytes))
+		fmt.Println("TOON JSON (first 400 chars):")
+		if len(toonBytes) > 400 {
+			fmt.Println(string(toonBytes[:400]))
+		} else {
+			fmt.Println(string(toonBytes))
+		}
+		fmt.Println()
 	}
 }

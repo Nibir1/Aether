@@ -1,3 +1,5 @@
+// cmd/test_rss/main.go
+
 package main
 
 import (
@@ -10,26 +12,82 @@ import (
 )
 
 func main() {
-	cli, err := aether.NewClient(
-		aether.WithDebugLogging(true),
-	)
+
+	// =====================================================================
+	// A) NORMAL MODE (robots.txt ON, no overrides)
+	// =====================================================================
+
+	fmt.Println("====================================================")
+	fmt.Println("A) RSS TEST — ROBOTS.TXT MODE (DEFAULT)")
+	fmt.Println("====================================================")
+	fmt.Println()
+	fmt.Println(">>> Running test suite for: NORMAL MODE (robots ON)")
+	fmt.Println()
+
+	runRSSTest(false) // robots override disabled
+
+	// =====================================================================
+	// B) OVERRIDE MODE (allow HN feed)
+	// =====================================================================
+
+	fmt.Println("====================================================")
+	fmt.Println("B) RSS TEST — ROBOTS OVERRIDE ENABLED FOR HN")
+	fmt.Println("====================================================")
+	fmt.Println()
+	fmt.Println(">>> Running test suite for: ROBOTS OVERRIDE MODE")
+	fmt.Println()
+
+	runRSSTest(true) // override enabled
+}
+
+func runRSSTest(override bool) {
+
+	// -----------------------------
+	// Create client with optional overrides
+	// -----------------------------
+	var cli *aether.Client
+	var err error
+
+	if override {
+		cli, err = aether.NewClient(
+			aether.WithDebugLogging(true),
+			aether.WithRobotsOverride(
+				"hnrss.org",
+				"news.ycombinator.com",
+			),
+		)
+	} else {
+		cli, err = aether.NewClient(
+			aether.WithDebugLogging(true),
+		)
+	}
+
 	if err != nil {
 		log.Fatalf("failed to create Aether client: %v", err)
 	}
 
+	// -----------------------------
+	// Context with timeout
+	// -----------------------------
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	// A well-known example RSS feed
+	// -----------------------------
+	// Target feed
+	// -----------------------------
 	feedURL := "https://hnrss.org/frontpage"
 
-	fmt.Println("=== Test 2: RSS Fetch + Parse ===")
+	fmt.Println("=== Test: RSS Fetch + Parse ===")
 	fmt.Println("Feed URL:", feedURL)
 	fmt.Println()
 
+	// -----------------------------
+	// Fetch + Parse RSS
+	// -----------------------------
 	feed, err := cli.FetchRSS(ctx, feedURL)
 	if err != nil {
-		log.Fatalf("FetchRSS error: %v", err)
+		fmt.Printf("FetchRSS error: %v\n\n", err)
+		return
 	}
 
 	fmt.Println("Feed:")
