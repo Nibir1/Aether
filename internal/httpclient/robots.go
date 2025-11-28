@@ -2,6 +2,16 @@
 //
 // This file implements robots.txt fetching and caching for the HTTP
 // client. Robots files are fetched once per host and reused.
+//
+// Option A (Host-Level Override):
+// --------------------------------
+// Aether remains 100% compliant by default. If the user explicitly
+// enables RobotsOverrideEnabled and provides RobotsAllowedHosts,
+// Aether will *skip* robots.txt checks ONLY for those hosts.
+//
+// This preserves legal safety: the user must opt-in to override.
+//
+
 package httpclient
 
 import (
@@ -10,9 +20,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/Nibir1/Aether/internal/config"
 	"github.com/Nibir1/Aether/internal/errors"
 	"github.com/Nibir1/Aether/internal/robots"
 )
@@ -20,45 +32,85 @@ import (
 type robotsCache struct {
 	mu      sync.Mutex
 	entries map[string]*robotsEntry
+	cfg     *config.Config
 }
 
 type robotsEntry struct {
-	rules *robots.Robots
-	// fetchedAt can be used for TTL if desired; for now we keep entries
-	// for the lifetime of the process.
+	rules     *robots.Robots
 	fetchedAt time.Time
 }
 
-func newRobotsCache() *robotsCache {
+// newRobotsCache creates a robots cache with reference to global config.
+func newRobotsCache(cfg *config.Config) *robotsCache {
 	return &robotsCache{
 		entries: make(map[string]*robotsEntry),
+		cfg:     cfg,
 	}
 }
 
-// allowed checks robots.txt for the given URL and userAgent. It fetches
-// and parses robots.txt on first use for each host and caches the result.
+// canonicalHost normalizes hosts for lookup:
+// - lowercase
+// - remove :port
+func canonicalHost(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	if h == "" {
+		return ""
+	}
+	// strip port
+	if idx := strings.IndexByte(h, ':'); idx != -1 {
+		h = h[:idx]
+	}
+	return h
+}
+
+// allowed checks whether access to rawURL is permitted by robots.txt.
 //
-// If robots.txt cannot be fetched (network error, timeout, 404, etc.),
-// Aether treats the host as having no robots rules and allows access.
-// This is a common and reasonable default.
+// Behavior:
+// ---------
+// 1. If override mode is ON and host is allowed → return true immediately.
+// 2. Otherwise, perform standard robots.txt fetch + cache.
+// 3. If robots.txt cannot be fetched → allow by default.
+// 4. Else check Robots rules.
 func (c *robotsCache) allowed(
 	ctx context.Context,
 	rawURL string,
 	userAgent string,
 	client *http.Client,
 ) (bool, error) {
+
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return false, errors.New(errors.KindHTTP, "invalid URL for robots check", err)
 	}
+
+	hostName := canonicalHost(parsed.Host)
 	hostKey := parsed.Scheme + "://" + parsed.Host
+
+	//
+	// ──────────────────────────────────────────────
+	// OPTION A: Host-level robots override
+	// ──────────────────────────────────────────────
+	//
+	if c.cfg.RobotsOverrideEnabled && hostName != "" {
+		for _, allowed := range c.cfg.RobotsAllowedHosts {
+			if canonicalHost(allowed) == hostName {
+				// User explicitly granted override permission.
+				return true, nil
+			}
+		}
+	}
+
+	//
+	// ──────────────────────────────────────────────
+	// Standard robots.txt handling
+	// ──────────────────────────────────────────────
+	//
 
 	entry := c.get(hostKey)
 	if entry == nil {
 		entry, err = c.fetch(ctx, hostKey, client)
 		if err != nil {
-			// On robots fetch failure, allow by default but surface the
-			// error to the caller via log if needed.
+			// Fail open: if robots cannot be fetched, allow access.
 			return true, nil
 		}
 	}
@@ -67,6 +119,7 @@ func (c *robotsCache) allowed(
 	if path == "" {
 		path = "/"
 	}
+
 	return entry.rules.Allowed(userAgent, path), nil
 }
 
@@ -81,6 +134,7 @@ func (c *robotsCache) fetch(
 	hostKey string,
 	client *http.Client,
 ) (*robotsEntry, error) {
+
 	c.mu.Lock()
 	if entry, ok := c.entries[hostKey]; ok {
 		c.mu.Unlock()
@@ -100,8 +154,8 @@ func (c *robotsCache) fetch(
 	}
 	defer resp.Body.Close()
 
+	// If robots.txt missing → treat as empty rules
 	if resp.StatusCode >= 400 {
-		// treat as no rules
 		entry := &robotsEntry{
 			rules:     &robots.Robots{},
 			fetchedAt: time.Now(),

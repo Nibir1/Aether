@@ -46,6 +46,21 @@ type Config struct {
 
 	// Redis server address, e.g. "localhost:6379"
 	RedisAddress string
+
+	// --- Robots.txt behavior (Option A: host-level override) ---
+
+	// RobotsOverrideList contains hostnames for which Aether will
+	// *not* consult robots.txt and will treat all paths as allowed.
+	//
+	// IMPORTANT:
+	//   • This list is empty by default.
+	//   • Hosts are compared case-insensitively, without port.
+	//   • Responsibility for ignoring robots.txt lies with the caller.
+	RobotsOverrideList []string
+
+	// --- robots override system ---
+	RobotsOverrideEnabled bool
+	RobotsAllowedHosts    []string
 }
 
 // Default constructs a Config with safe, conservative defaults.
@@ -70,5 +85,10 @@ func Default() *Config {
 
 		CacheDirectory: "",
 		RedisAddress:   "",
+
+		RobotsOverrideList: nil,
+
+		RobotsOverrideEnabled: false,
+		RobotsAllowedHosts:    []string{},
 	}
 }

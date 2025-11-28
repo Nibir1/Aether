@@ -3,19 +3,8 @@
 // JSONL Streaming Output for Aether
 //
 // This file introduces a streaming interface that writes normalized
-// Aether documents as *JSON Lines* (JSONL), one logical unit per line,
-// enabling incremental consumption by CLIs, pipelines, and LLM/RAG systems.
-//
-// Design Rules:
-//   • Streaming is incremental (no buffering)
-//   • Each line is a valid standalone JSON object
-//   • Output units follow: Document → Metadata → Sections → FeedItems
-//   • Caller controls the io.Writer (stdout, file, socket, pipe)
-//   • Zero memory accumulation (ideal for large documents)
-//   • NO plugins are executed here — this is purely serialization.
-//
-// The goal is to provide a production-grade JSONL interface without
-// altering core normalization or TOON logic.
+// Aether documents as JSON Lines (JSONL). It also supports streaming
+// public Aether feed items (RSS/Atom) using the public Feed type.
 
 package aether
 
@@ -24,18 +13,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-
-	"github.com/Nibir1/Aether/internal/rss"
 )
 
-// JSONLObject is the container for each JSONL line.
-// Every streamed line uses this structure.
+// JSONLObject is the structure written for each JSONL line.
 type JSONLObject struct {
 	Type string                 `json:"type"`
 	Data map[string]interface{} `json:"data"`
 }
 
-// writeJSONL writes a single JSONL object to w.
+// writeJSONL writes exactly one JSONL object to the writer.
 func writeJSONL(w io.Writer, obj JSONLObject) error {
 	b, err := json.Marshal(obj)
 	if err != nil {
@@ -47,7 +33,7 @@ func writeJSONL(w io.Writer, obj JSONLObject) error {
 
 //
 // ────────────────────────────────────────────────────────────────
-//           PUBLIC API — STREAM NORMALIZED DOCUMENT
+//           STREAM NORMALIZED DOCUMENT
 // ────────────────────────────────────────────────────────────────
 //
 
@@ -57,7 +43,7 @@ func (c *Client) StreamNormalizedJSONL(ctx context.Context, w io.Writer, doc *No
 		return fmt.Errorf("aether: nil document in StreamNormalizedJSONL")
 	}
 
-	// 1) Stream the document header
+	// Document header line
 	if err := writeJSONL(w, JSONLObject{
 		Type: "document",
 		Data: map[string]interface{}{
@@ -71,7 +57,7 @@ func (c *Client) StreamNormalizedJSONL(ctx context.Context, w io.Writer, doc *No
 		return err
 	}
 
-	// 2) Stream metadata
+	// Metadata block
 	if len(doc.Metadata) > 0 {
 		if err := writeJSONL(w, JSONLObject{
 			Type: "metadata",
@@ -83,7 +69,7 @@ func (c *Client) StreamNormalizedJSONL(ctx context.Context, w io.Writer, doc *No
 		}
 	}
 
-	// 3) Stream sections one-by-one
+	// Sections (one per line)
 	for _, s := range doc.Sections {
 		if err := writeJSONL(w, JSONLObject{
 			Type: "section",
@@ -103,11 +89,10 @@ func (c *Client) StreamNormalizedJSONL(ctx context.Context, w io.Writer, doc *No
 
 //
 // ────────────────────────────────────────────────────────────────
-//       PUBLIC API — STREAM SEARCHRESULT DIRECTLY AS JSONL
+//       STREAM SEARCHRESULT DIRECTLY AS JSONL
 // ────────────────────────────────────────────────────────────────
 //
 
-// StreamSearchResultJSONL normalizes a SearchResult and streams JSONL.
 func (c *Client) StreamSearchResultJSONL(ctx context.Context, w io.Writer, sr *SearchResult) error {
 	if sr == nil {
 		return fmt.Errorf("aether: nil SearchResult")
@@ -118,12 +103,12 @@ func (c *Client) StreamSearchResultJSONL(ctx context.Context, w io.Writer, sr *S
 
 //
 // ────────────────────────────────────────────────────────────────
-//     OPTIONAL: STREAM FEED ITEMS DIRECTLY (RSS / Atom / etc.)
+//       STREAM PUBLIC FEED ITEMS (Aether.Feed)
 // ────────────────────────────────────────────────────────────────
 //
 
-// StreamFeedJSONL streams each FeedItem as a JSONL object.
-func (c *Client) StreamFeedJSONL(ctx context.Context, w io.Writer, feed *rss.Feed) error {
+// StreamFeedJSONL streams each *public* FeedItem as JSONL.
+func (c *Client) StreamFeedJSONL(ctx context.Context, w io.Writer, feed *Feed) error {
 	if feed == nil {
 		return fmt.Errorf("aether: nil Feed")
 	}
@@ -142,9 +127,11 @@ func (c *Client) StreamFeedJSONL(ctx context.Context, w io.Writer, feed *rss.Fee
 				"updated":     item.Updated,
 			},
 		}
+
 		if err := writeJSONL(w, obj); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }

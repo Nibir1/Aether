@@ -33,12 +33,13 @@ type Error = errors.Error
 // - Consumers do NOT use this directly.
 // - The public aether.Client wraps this and provides Fetch().
 type Client struct {
-	cfg     *config.Config
-	logger  log.Logger
-	http    *http.Client
-	robots  *robotsCache
-	limiter *hostLimiter
-	cache   cache.Cache // NEW: unified memory/file/redis cache
+	cfg            *config.Config
+	logger         log.Logger
+	http           *http.Client
+	robots         *robotsCache
+	limiter        *hostLimiter
+	cache          cache.Cache // unified memory/file/redis cache
+	robotsOverride map[string]struct{}
 }
 
 // New constructs a new internal HTTP client.
@@ -59,13 +60,25 @@ func New(cfg *config.Config, logger log.Logger, unified cache.Cache) *Client {
 		Timeout: timeout,
 	}
 
+	// Build host-level robots override map from config.
+	overrideMap := make(map[string]struct{})
+	for _, raw := range cfg.RobotsOverrideList {
+		if ch := canonicalHost(raw); ch != "" {
+			overrideMap[ch] = struct{}{}
+		}
+	}
+	if len(overrideMap) == 0 {
+		overrideMap = nil
+	}
+
 	return &Client{
-		cfg:     cfg,
-		logger:  logger,
-		http:    httpClient,
-		robots:  newRobotsCache(),
-		limiter: newHostLimiter(cfg.MaxConcurrentHosts, cfg.MaxRequestsPerHost),
-		cache:   unified, // unified composite cache
+		cfg:            cfg,
+		logger:         logger,
+		http:           httpClient,
+		robots:         newRobotsCache(cfg),
+		limiter:        newHostLimiter(cfg.MaxConcurrentHosts, cfg.MaxRequestsPerHost),
+		cache:          unified,
+		robotsOverride: overrideMap,
 	}
 }
 
@@ -94,7 +107,12 @@ func (c *Client) Fetch(
 	}
 	defer c.limiter.Release(hostKey)
 
-	// Robots.txt check (fail-closed for errors, allow for fetch failures).
+	// Robots.txt check (fail-closed for robots violations).
+	//
+	// Option A override:
+	//   - If the host is listed in robotsOverride, robots.allowed()
+	//     will *immediately* return (true, nil) and skip any robots
+	//     fetching/parsing.
 	allowed, err := c.robots.allowed(ctx, rawURL, c.cfg.UserAgent, c.http)
 	if err != nil {
 		return nil, err
