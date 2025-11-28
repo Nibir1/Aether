@@ -39,7 +39,7 @@ Aether turns arbitrary public web content into **structured, LLM‑ready represe
    - [TOON Streaming](#13-toon-streaming)
    - [Error Handling](#14-error-handling)
    - [Configuration & Caching](#15-configuration--caching)
-   - [Robots Override](#16-robots--override)
+   - [Robots Override](#16-robots-override)
 7. [cmd/ Test Programs](#cmd-test-programs)
 8. [Status & Roadmap](#status--roadmap)
 9. [License](#license)
