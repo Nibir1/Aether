@@ -14,9 +14,7 @@
 //   • Produce a SearchResult with a PrimaryDocument, optional Article/Feed,
 //     and a SearchPlan describing what was done.
 //
-// NOTE:
-// This is the first full implementation of the search pipeline. Future
-// stages may extend it with:
+// Future expansions:
 //   • richer SmartQuery intent detection
 //   • multi-source federation and merging
 //   • deeper RSS/article handling
@@ -52,10 +50,10 @@ const (
 
 // SearchPlan describes how Aether decided to handle a query.
 type SearchPlan struct {
-	RawQuery string       // original user query
-	Intent   SearchIntent // URL vs lookup vs plugin-driven
-	URL      string       // populated for URL-based queries
-	Source   string       // plugin or integration that provided primary result
+	RawQuery string
+	Intent   SearchIntent
+	URL      string
+	Source   string
 }
 
 // SearchDocumentKind describes the kind of the primary document.
@@ -71,52 +69,33 @@ const (
 	SearchDocumentKindBinary  SearchDocumentKind = "binary"
 )
 
-// SearchDocument is the primary, high-level document for a search.
-//
-// It intentionally mirrors Aether's normalized model at a higher level,
-// and is later converted into model.Document by NormalizeSearchResult.
+// SearchDocument is the primary document for a SearchResult.
 type SearchDocument struct {
-	URL      string             // canonical URL, if any
-	Kind     SearchDocumentKind // article, html_page, feed, json, text, binary
-	Title    string             // human-readable title
-	Excerpt  string             // short summary or snippet
-	Content  string             // main textual body
-	Metadata map[string]string  // flat key/value metadata
+	URL      string
+	Kind     SearchDocumentKind
+	Title    string
+	Excerpt  string
+	Content  string
+	Metadata map[string]string
 }
 
-// SearchResult is the main output of Aether.Search.
-//
-// It contains:
-//   - the original query
-//   - the plan describing what was done
-//   - the primary document (SearchDocument)
-//   - optional richer views (Article, Feed) populated by other subsystems
+// SearchResult returned by Aether.Search.
 type SearchResult struct {
 	Query           string
 	Plan            SearchPlan
 	PrimaryDocument *SearchDocument
 
-	// Optional views that may be populated by other subsystems:
-	Article *Article // from ExtractText / readability engine (Stage 5)
-	Feed    *Feed    // from RSS subsystem (Stage 8)
+	Article *Article
+	Feed    *Feed
 }
 
 //
 // ────────────────────────────────────────────────
-//                    ENTRYPOINT
+//                   ENTRYPOINT
 // ────────────────────────────────────────────────
 //
 
-// Search runs Aether's high-level search pipeline for the given query.
-//
-// Behavior:
-//   - URL queries → robots.txt-compliant fetch → SearchDocument
-//   - Non-URL queries:
-//   - Try SourcePlugins (in registration order)
-//   - Fallback to Wikipedia summary via internal OpenAPI client
-//
-// TODO (future stages): expand SmartQuery classification, integrate RSS
-// auto-detection, transform plugins, and richer federation.
+// Search is the high-level Aether search pipeline.
 func (c *Client) Search(ctx context.Context, query string) (*SearchResult, error) {
 	if c == nil {
 		return nil, fmt.Errorf("aether: nil client in Search")
@@ -132,6 +111,7 @@ func (c *Client) Search(ctx context.Context, query string) (*SearchResult, error
 		Intent:   SearchIntentUnknown,
 	}
 
+	// ─── URL Query ─────────────────────────────────────────────────
 	if isProbablyURL(query) {
 		plan.Intent = SearchIntentURL
 		plan.URL = query
@@ -145,15 +125,13 @@ func (c *Client) Search(ctx context.Context, query string) (*SearchResult, error
 			Query:           query,
 			Plan:            plan,
 			PrimaryDocument: doc,
-			Article:         nil,
-			Feed:            nil,
 		}, nil
 	}
 
-	// non-URL → treat as lookup / textual query
+	// ─── Textual Query (Lookup/Plugin) ─────────────────────────────
 	plan.Intent = SearchIntentLookup
 
-	// 1) Try SourcePlugins first (plugin-based integrations).
+	// 1) Try source plugins
 	if c.plugins != nil {
 		if doc, sourceName, err := c.searchViaPlugins(ctx, query); err == nil && doc != nil {
 			plan.Intent = SearchIntentPlugin
@@ -163,13 +141,11 @@ func (c *Client) Search(ctx context.Context, query string) (*SearchResult, error
 				Query:           query,
 				Plan:            plan,
 				PrimaryDocument: doc,
-				Article:         nil,
-				Feed:            nil,
 			}, nil
 		}
 	}
 
-	// 2) Fallback to Wikipedia summary for factual queries.
+	// 2) Fallback: Wikipedia Summary
 	doc, err := c.searchViaWikipedia(ctx, query)
 	if err != nil {
 		return nil, err
@@ -180,8 +156,6 @@ func (c *Client) Search(ctx context.Context, query string) (*SearchResult, error
 		Query:           query,
 		Plan:            plan,
 		PrimaryDocument: doc,
-		Article:         nil,
-		Feed:            nil,
 	}, nil
 }
 
@@ -222,7 +196,7 @@ func (c *Client) searchURL(ctx context.Context, plan SearchPlan) (*SearchDocumen
 	return &SearchDocument{
 		URL:      plan.URL,
 		Kind:     kind,
-		Title:    "", // Article extractor / metadata subsystem may fill this later.
+		Title:    "",
 		Excerpt:  excerpt,
 		Content:  textBody,
 		Metadata: metadata,
@@ -235,8 +209,7 @@ func (c *Client) searchURL(ctx context.Context, plan SearchPlan) (*SearchDocumen
 // ────────────────────────────────────────────────
 //
 
-// searchViaPlugins attempts to satisfy the query using registered SourcePlugins.
-// It returns the first successful SearchDocument produced by any plugin.
+// searchViaPlugins tries registered SourcePlugins.
 func (c *Client) searchViaPlugins(ctx context.Context, query string) (*SearchDocument, string, error) {
 	if c.plugins == nil {
 		return nil, "", fmt.Errorf("no plugin registry available")
@@ -259,7 +232,7 @@ func (c *Client) searchViaPlugins(ctx context.Context, query string) (*SearchDoc
 			continue
 		}
 
-		// Attach plugin name into metadata
+		// Annotate metadata with source plugin
 		if sd.Metadata == nil {
 			sd.Metadata = map[string]string{}
 		}
@@ -271,8 +244,7 @@ func (c *Client) searchViaPlugins(ctx context.Context, query string) (*SearchDoc
 	return nil, "", fmt.Errorf("no source plugin produced a result")
 }
 
-// searchDocumentFromPluginDocument converts a plugins.Document into a
-// SearchDocument suitable for Aether's SearchResult.
+// Convert plugins.Document → SearchDocument.
 func searchDocumentFromPluginDocument(doc *plugins.Document) *SearchDocument {
 	if doc == nil {
 		return nil
@@ -296,6 +268,7 @@ func searchDocumentFromPluginDocument(doc *plugins.Document) *SearchDocument {
 		kind = SearchDocumentKindUnknown
 	}
 
+	// Clone metadata
 	meta := map[string]string{}
 	for k, v := range doc.Metadata {
 		meta[k] = v
@@ -325,11 +298,6 @@ func searchDocumentFromPluginDocument(doc *plugins.Document) *SearchDocument {
 // ────────────────────────────────────────────────
 //
 
-// searchViaWikipedia uses the built-in OpenAPI client to fetch a concise
-// summary of the topic from Wikipedia.
-//
-// This is the default fallback for non-URL queries when no SourcePlugin
-// handled the request.
 func (c *Client) searchViaWikipedia(ctx context.Context, query string) (*SearchDocument, error) {
 	summary, err := c.WikipediaSummary(ctx, query)
 	if err != nil {
@@ -366,8 +334,6 @@ func (c *Client) searchViaWikipedia(ctx context.Context, query string) (*SearchD
 // ────────────────────────────────────────────────
 //
 
-// isProbablyURL performs a lightweight heuristic to decide whether a query
-// looks like a URL (http/https).
 func isProbablyURL(q string) bool {
 	if strings.HasPrefix(q, "http://") || strings.HasPrefix(q, "https://") {
 		u, err := url.Parse(q)
@@ -376,7 +342,6 @@ func isProbablyURL(q string) bool {
 	return false
 }
 
-// classifyContentType normalizes a Content-Type header into a simple string.
 func classifyContentType(h http.Header) string {
 	if h == nil {
 		return "application/octet-stream"
@@ -388,14 +353,12 @@ func classifyContentType(h http.Header) string {
 	return strings.ToLower(ct)
 }
 
-// buildExcerpt produces a short snippet from a longer body.
 func buildExcerpt(body string, maxLen int) string {
 	body = strings.TrimSpace(body)
 	if body == "" {
 		return ""
 	}
 
-	// Collapse whitespace and newlines for a single-line excerpt.
 	body = collapseWhitespace(body)
 
 	if len(body) <= maxLen {
@@ -408,7 +371,6 @@ func buildExcerpt(body string, maxLen int) string {
 	return body[:maxLen-3] + "..."
 }
 
-// collapseWhitespace replaces all sequences of whitespace with a single space.
 func collapseWhitespace(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))

@@ -104,12 +104,10 @@ func (c *Client) ToNormalized(sr *SearchResult) *model.Document {
 // ───────────────────────────────────────────────────────────────────────────
 //
 
-// normalizeFormat ensures format matching is case-insensitive.
 func normalizeFormat(f string) string {
 	return strings.ToLower(strings.TrimSpace(f))
 }
 
-// FindDisplayPlugin returns a display plugin by format ("html", "pdf", "ansi", …).
 func (c *Client) FindDisplayPlugin(format string) (plugins.DisplayPlugin, bool) {
 	if c == nil || c.plugins == nil {
 		return nil, false
@@ -121,8 +119,6 @@ func (c *Client) FindDisplayPlugin(format string) (plugins.DisplayPlugin, bool) 
 	return p, true
 }
 
-// ListDisplayFormats lists all registered plugin-provided formats.
-// Example output: []string{"html", "ansi", "pdf"}
 func (c *Client) ListDisplayFormats() []string {
 	if c == nil || c.plugins == nil {
 		return nil
@@ -136,16 +132,9 @@ func (c *Client) ListDisplayFormats() []string {
 // ───────────────────────────────────────────────────────────────────────────
 //
 
-// Render renders a normalized document using either a built-in format
-// or a DisplayPlugin. Strict mode (Option B):
-//
-// Built-in formats:
-//   - "markdown", "md"
-//   - "preview"
-//   - "text" (alias of markdown)
-//
-// All other formats MUST come from DisplayPlugins.
-// If no plugin exists → error.
+// Render renders a normalized document into a given format.
+// Built-in: markdown/md, preview, text
+// All other formats → MUST come from a DisplayPlugin.
 func (c *Client) Render(ctx context.Context, format string, doc *NormalizedDocument) ([]byte, error) {
 	if c == nil {
 		return nil, fmt.Errorf("aether: nil client")
@@ -159,21 +148,18 @@ func (c *Client) Render(ctx context.Context, format string, doc *NormalizedDocum
 	// ───── Built-in formats ────────────────────────────────────────────────
 	switch f {
 	case "markdown", "md", "":
-		out := c.RenderMarkdown(doc)
-		return []byte(out), nil
+		return []byte(c.RenderMarkdown(doc)), nil
 
 	case "text":
-		out := c.RenderMarkdown(doc)
-		return []byte(out), nil
+		return []byte(c.RenderMarkdown(doc)), nil
 
 	case "preview":
-		out := c.RenderPreview(doc)
-		return []byte(out), nil
+		return []byte(c.RenderPreview(doc)), nil
 	}
 
 	// ───── Plugin-required formats (Strict Mode) ───────────────────────────
 	if c.plugins == nil {
-		return nil, fmt.Errorf("aether: no display plugin registry available for format %q", f)
+		return nil, fmt.Errorf("aether: no plugin registry available for format %q", f)
 	}
 
 	p := c.plugins.FindDisplayByFormat(f)
@@ -181,8 +167,10 @@ func (c *Client) Render(ctx context.Context, format string, doc *NormalizedDocum
 		return nil, fmt.Errorf("aether: no display plugin registered for format %q", f)
 	}
 
-	// Normalized document is an alias of model.Document; cast to be explicit.
-	pdoc := modelToPluginDocument((*model.Document)(doc))
+	// NormalizedDocument is an alias of model.Document — convert properly.
+	m := (*model.Document)(doc)
+	pdoc := modelToPluginDocument(m)
+
 	return p.Render(ctx, pdoc)
 }
 

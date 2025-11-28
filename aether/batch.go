@@ -2,37 +2,39 @@
 //
 // Batch subsystem (Stage 16).
 //
-// This provides a high-level, concurrency-friendly wrapper that fetches
-// multiple URLs at once using Aether’s internal fetch pipeline.
+// Provides a concurrency-friendly wrapper that fetches multiple URLs using
+// Aether’s robots.txt-compliant internal fetch pipeline.
 //
-// Features:
-//   • robots.txt-compliant (via underlying http fetcher)
-//   • per-host fairness & rate-limiting automatically preserved
-//   • configurable concurrency
-//   • returns structured BatchResult with per-URL errors
+// Guarantees:
+//   • robots.txt compliance (via internal httpclient)
+//   • per-host fairness + rate limiting
+//   • automatic gzip/deflate decoding
+//   • stable per-URL errors rather than global failures
+//   • ordering preserved exactly as input.
 //
-// Future expansions may add plugin hooks, transform passes, or TOON/JSON
-// serialization helpers.
+// Future extensions may incorporate plugins, TOON encoding, or transform passes.
 
 package aether
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 )
 
-// BatchOptions configures the behavior of batch fetch operations.
+// BatchOptions configures batch fetch behavior.
 type BatchOptions struct {
 	// Maximum concurrent workers. If <= 0, defaults to 4.
 	Concurrency int
 
-	// Optional additional headers applied to each fetch request.
+	// Optional extra headers applied to every fetch.
 	Headers http.Header
 }
 
-// BatchItemResult represents the outcome of a single fetch in the batch.
+// BatchItemResult is the result of one fetch operation.
 type BatchItemResult struct {
 	URL        string
 	StatusCode int
@@ -41,22 +43,26 @@ type BatchItemResult struct {
 	Err        error
 }
 
-// BatchResult contains results for all fetched URLs in the same order
-// as the input slice.
+// BatchResult contains all results in the same order as input.
 type BatchResult struct {
 	Results []BatchItemResult
 }
 
-// ErrNilClient is returned when methods are called on a nil *Client receiver.
-// This prevents panics and provides a predictable error signal.
+// ErrNilClient indicates methods were called on a nil *Client.
 var ErrNilClient = errors.New("aether: nil client")
 
-// Batch fetches a list of URLs using Aether’s internal robots.txt-compliant
-// fetcher and returns structured results. The function preserves input
-// ordering in the result set.
+// Batch performs robots-compliant GET operations on multiple URLs.
+//
+// It always returns a *BatchResult, even if some items fail.
+// The error return only signals fatal client misconfiguration (nil client/globals).
+//
+// Per-item errors are stored inside Results[i].Err.
 func (c *Client) Batch(ctx context.Context, urls []string, opts BatchOptions) (*BatchResult, error) {
 	if c == nil {
 		return nil, ErrNilClient
+	}
+	if c.fetcher == nil {
+		return nil, fmt.Errorf("aether: client fetcher is not initialized")
 	}
 
 	n := len(urls)
@@ -64,16 +70,22 @@ func (c *Client) Batch(ctx context.Context, urls []string, opts BatchOptions) (*
 		return &BatchResult{Results: nil}, nil
 	}
 
-	// Default concurrency
+	// Worker pool size
 	workers := opts.Concurrency
 	if workers <= 0 {
 		workers = 4
 	}
 
-	// The output slice is pre-allocated in correct order.
+	// Preallocate results in correct index order
 	results := make([]BatchItemResult, n)
 
-	// A channel of jobs: each job is (index, url)
+	// Immutable header clone (avoid shared map mutation)
+	var hdr http.Header
+	if opts.Headers != nil {
+		hdr = opts.Headers.Clone()
+	}
+
+	// Job descriptor
 	type job struct {
 		idx int
 		url string
@@ -81,50 +93,69 @@ func (c *Client) Batch(ctx context.Context, urls []string, opts BatchOptions) (*
 
 	jobs := make(chan job)
 	wg := sync.WaitGroup{}
+	wg.Add(workers)
 
-	// Worker function using Aether.fetcher
+	// Worker function
 	worker := func() {
 		defer wg.Done()
 
 		for j := range jobs {
-			res := BatchItemResult{URL: j.url}
+			url := strings.TrimSpace(j.url)
+			res := BatchItemResult{URL: url}
 
-			resp, err := c.fetcher.Fetch(ctx, j.url, opts.Headers)
+			if url == "" {
+				res.Err = fmt.Errorf("aether: empty URL")
+				results[j.idx] = res
+				continue
+			}
+
+			// Honor context cancellation before fetch
+			select {
+			case <-ctx.Done():
+				res.Err = ctx.Err()
+				results[j.idx] = res
+				continue
+			default:
+			}
+
+			resp, err := c.fetcher.Fetch(ctx, url, hdr)
 			if err != nil {
 				res.Err = err
 				results[j.idx] = res
 				continue
 			}
 
-			res.Body = resp.Body
-			res.Header = resp.Header.Clone()
 			res.StatusCode = resp.StatusCode
+			res.Body = resp.Body
+
+			if resp.Header != nil {
+				res.Header = resp.Header.Clone()
+			} else {
+				res.Header = http.Header{}
+			}
 
 			results[j.idx] = res
 		}
 	}
 
 	// Start workers
-	wg.Add(workers)
 	for w := 0; w < workers; w++ {
 		go worker()
 	}
 
-	// Feed the jobs
+	// Feed jobs
 	go func() {
+		defer close(jobs)
 		for i, u := range urls {
 			select {
 			case <-ctx.Done():
-				// If context canceled, close and exit workers early.
-				close(jobs)
 				return
 			case jobs <- job{idx: i, url: u}:
 			}
 		}
-		close(jobs)
 	}()
 
-	// Wait for all workers to finish
+	// Wait for workers
 	wg.Wait()
 
 	return &BatchResult{Results: results}, nil

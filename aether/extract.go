@@ -9,10 +9,17 @@ package aether
 
 import (
 	"context"
+	"fmt"
 
 	iextract "github.com/Nibir1/Aether/internal/extract"
 	ihtml "github.com/Nibir1/Aether/internal/html"
 )
+
+//
+// ───────────────────────────────────────────────────────────────
+//                           PUBLIC TYPES
+// ───────────────────────────────────────────────────────────────
+//
 
 // Article is the public article representation returned by Aether.
 //
@@ -30,19 +37,31 @@ type Article struct {
 	Meta    map[string]string
 }
 
+//
+// ───────────────────────────────────────────────────────────────
+//                  EXTRACT FROM RAW HTML (NO FETCH)
+// ───────────────────────────────────────────────────────────────
+//
+
 // ExtractArticleFromHTML extracts the main article content from raw HTML.
 //
 // url is optional but recommended; it is stored in the Article result
 // and may be used by future features (e.g. canonical URL resolution).
 func (c *Client) ExtractArticleFromHTML(html []byte, url string) (*Article, error) {
+	if len(html) == 0 {
+		return nil, fmt.Errorf("aether: empty HTML buffer")
+	}
+
 	doc, err := ihtml.ParseDocument(html)
 	if err != nil {
 		return nil, err
 	}
 
+	// Base HTML metadata
 	title := ihtml.ExtractTitle(doc)
 	meta := ihtml.ExtractMeta(doc)
 
+	// Run Readability-style extraction
 	internal := iextract.Extract(doc, url)
 	if internal == nil {
 		internal = &iextract.Article{}
@@ -66,11 +85,24 @@ func (c *Client) ExtractArticleFromHTML(html []byte, url string) (*Article, erro
 	return article, nil
 }
 
+//
+// ───────────────────────────────────────────────────────────────
+//                  HIGH-LEVEL: FETCH + EXTRACT
+// ───────────────────────────────────────────────────────────────
+//
+
 // ExtractArticle fetches the given URL (respecting robots.txt) and runs
 // article extraction on the retrieved HTML.
 //
 // This is a convenience wrapper around Fetch + ExtractArticleFromHTML.
 func (c *Client) ExtractArticle(ctx context.Context, url string) (*Article, error) {
+	if c == nil {
+		return nil, fmt.Errorf("aether: nil client in ExtractArticle")
+	}
+	if url == "" {
+		return nil, fmt.Errorf("aether: empty URL in ExtractArticle")
+	}
+
 	res, err := c.Fetch(ctx, url)
 	if err != nil {
 		return nil, err

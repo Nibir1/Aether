@@ -4,7 +4,8 @@
 // It does not perform network calls; instead it analyzes a query string,
 // infers intent, and returns a routing plan that higher-level functions
 // (such as Search) can execute.
-//
+// SmartQuery API — classification + routing plan generator.
+// Pure logic: no I/O, no network calls, deterministic and unit-testable.
 // This keeps SmartQuery deterministic, fast, and easy to unit-test.
 
 package aether
@@ -31,9 +32,6 @@ const (
 )
 
 // SmartQueryPlan is the public routing plan returned by Aether.
-//
-// It describes how Aether *would* answer the query, without actually
-// performing the network calls.
 type SmartQueryPlan struct {
 	Query           string
 	Intent          QueryIntent
@@ -49,22 +47,36 @@ type SmartQueryPlan struct {
 }
 
 // SmartQuery analyzes a natural-language query and returns a routing plan.
-//
-// This is a pure function of the query string: it does not hit the network,
-// does not fetch content, and does not depend on remote state. It is safe
-// to call frequently and suitable for unit testing.
+// Pure function. No network calls.
 func (c *Client) SmartQuery(query string) *SmartQueryPlan {
+	// Nil-client still produces a valid deterministic plan.
+	if c == nil {
+		trimmed := strings.TrimSpace(query)
+		return &SmartQueryPlan{
+			Query:  trimmed,
+			Intent: QueryIntentUnknown,
+		}
+	}
+
 	trimmed := strings.TrimSpace(query)
+
+	// Internal classification (struct)
 	internalClass := ismart.Classify(trimmed)
+
+	// Routing decision (struct)
 	route := ismart.BuildRoute(internalClass)
+
+	// Defensive deep-copy of slices (struct slices, so can still be nil)
+	primary := append([]string(nil), route.PrimarySources...)
+	fallback := append([]string(nil), route.FallbackSources...)
 
 	return &SmartQueryPlan{
 		Query:           trimmed,
 		Intent:          mapIntent(internalClass.Intent),
 		IsQuestion:      internalClass.IsQuestion,
 		HasURL:          internalClass.HasURL,
-		PrimarySources:  append([]string(nil), route.PrimarySources...),
-		FallbackSources: append([]string(nil), route.FallbackSources...),
+		PrimarySources:  primary,
+		FallbackSources: fallback,
 		UseLookup:       route.UseLookup,
 		UseSearchIndex:  route.UseSearchIndex,
 		UseOpenAPIs:     route.UseOpenAPIs,
@@ -73,7 +85,7 @@ func (c *Client) SmartQuery(query string) *SmartQueryPlan {
 	}
 }
 
-// mapIntent converts internal Intent to public QueryIntent.
+// mapIntent converts internal Intent (struct value) to public QueryIntent.
 func mapIntent(i ismart.Intent) QueryIntent {
 	switch i {
 	case ismart.IntentLookup:
@@ -92,8 +104,6 @@ func mapIntent(i ismart.Intent) QueryIntent {
 		return QueryIntentGitHub
 	case ismart.IntentGeneralSearch:
 		return QueryIntentGeneralSearch
-	case ismart.IntentUnknown:
-		fallthrough
 	default:
 		return QueryIntentUnknown
 	}

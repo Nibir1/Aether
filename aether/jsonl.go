@@ -24,6 +24,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+
+	"github.com/Nibir1/Aether/internal/rss"
 )
 
 // JSONLObject is the container for each JSONL line.
@@ -121,7 +123,7 @@ func (c *Client) StreamSearchResultJSONL(ctx context.Context, w io.Writer, sr *S
 //
 
 // StreamFeedJSONL streams each FeedItem as a JSONL object.
-func (c *Client) StreamFeedJSONL(ctx context.Context, w io.Writer, feed *Feed) error {
+func (c *Client) StreamFeedJSONL(ctx context.Context, w io.Writer, feed *rss.Feed) error {
 	if feed == nil {
 		return fmt.Errorf("aether: nil Feed")
 	}

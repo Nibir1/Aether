@@ -2,22 +2,13 @@
 //
 // Public wrappers around Aether's internal OpenAPI client. These
 // wrappers provide a stable, LLM-friendly interface over a variety
-// of free, public, no-API-key data sources. All integrations are
-// implemented internally via shared HTTP client infrastructure.
-//
-// Supported sources as of Stage 10:
-//   - Wikipedia REST API (summaries)
-//   - Wikidata (entity lookup + SPARQL)
-//   - Hacker News (top stories)
-//   - GitHub (README.md)
-//   - White House posts (WP-JSON API)
-//   - Global government press releases (RSS)
-//   - MET Norway weather (global forecast, key-less)
+// of free, public, no-API-key data sources.
 
 package aether
 
 import (
 	"context"
+	"fmt"
 )
 
 //
@@ -26,7 +17,6 @@ import (
 // ────────────────────────────────────────────────
 //
 
-// WikiSummary is the public Wikipedia summary representation.
 type WikiSummary struct {
 	Title       string
 	Description string
@@ -35,7 +25,6 @@ type WikiSummary struct {
 	Language    string
 }
 
-// HackerNewsStory is the public Hacker News story representation.
 type HackerNewsStory struct {
 	ID           int64
 	Title        string
@@ -46,7 +35,6 @@ type HackerNewsStory struct {
 	CommentCount int
 }
 
-// GitHubReadme is the public GitHub README representation.
 type GitHubReadme struct {
 	Owner   string
 	Repo    string
@@ -55,7 +43,6 @@ type GitHubReadme struct {
 	Content string
 }
 
-// WhiteHousePost is the public White House post representation.
 type WhiteHousePost struct {
 	ID       int64
 	Title    string
@@ -64,7 +51,6 @@ type WhiteHousePost struct {
 	Excerpt  string
 }
 
-// GovernmentPressRelease is the public normalized government press item.
 type GovernmentPressRelease struct {
 	Title    string
 	URL      string
@@ -73,7 +59,6 @@ type GovernmentPressRelease struct {
 	DateUnix int64
 }
 
-// Weather represents a normalized hourly weather entry.
 type Weather struct {
 	TimeUnix    int64
 	Temperature float64
@@ -82,7 +67,6 @@ type Weather struct {
 	Summary     string
 }
 
-// WikidataEntity represents a normalized Wikidata entity.
 type WikidataEntity struct {
 	ID          string
 	Title       string
@@ -96,11 +80,9 @@ type WikidataEntity struct {
 // ────────────────────────────────────────────────
 //
 
-// WikipediaSummary returns a concise summary for a given topic title
-// using the Wikipedia REST API.
 func (c *Client) WikipediaSummary(ctx context.Context, title string) (*WikiSummary, error) {
 	if c == nil || c.openapi == nil {
-		return nil, nil
+		return nil, fmt.Errorf("aether: openapi subsystem not initialized")
 	}
 
 	internal, err := c.openapi.WikipediaSummary(ctx, title)
@@ -125,7 +107,7 @@ func (c *Client) WikipediaSummary(ctx context.Context, title string) (*WikiSumma
 
 func (c *Client) HackerNewsTopStories(ctx context.Context, limit int) ([]HackerNewsStory, error) {
 	if c == nil || c.openapi == nil {
-		return nil, nil
+		return nil, fmt.Errorf("aether: openapi subsystem not initialized")
 	}
 
 	internalStories, err := c.openapi.HackerNewsTopStories(ctx, limit)
@@ -156,7 +138,7 @@ func (c *Client) HackerNewsTopStories(ctx context.Context, limit int) ([]HackerN
 
 func (c *Client) GitHubReadme(ctx context.Context, owner, repo, ref string) (*GitHubReadme, error) {
 	if c == nil || c.openapi == nil {
-		return nil, nil
+		return nil, fmt.Errorf("aether: openapi subsystem not initialized")
 	}
 
 	internal, err := c.openapi.GitHubReadme(ctx, owner, repo, ref)
@@ -181,7 +163,7 @@ func (c *Client) GitHubReadme(ctx context.Context, owner, repo, ref string) (*Gi
 
 func (c *Client) WhiteHouseRecentPosts(ctx context.Context, limit int) ([]WhiteHousePost, error) {
 	if c == nil || c.openapi == nil {
-		return nil, nil
+		return nil, fmt.Errorf("aether: openapi subsystem not initialized")
 	}
 
 	posts, err := c.openapi.WhiteHouseRecentPosts(ctx, limit)
@@ -210,7 +192,7 @@ func (c *Client) WhiteHouseRecentPosts(ctx context.Context, limit int) ([]WhiteH
 
 func (c *Client) GovernmentPress(ctx context.Context, limit int) ([]GovernmentPressRelease, error) {
 	if c == nil || c.openapi == nil {
-		return nil, nil
+		return nil, fmt.Errorf("aether: openapi subsystem not initialized")
 	}
 
 	items, err := c.openapi.GovernmentPress(ctx, limit)
@@ -239,7 +221,7 @@ func (c *Client) GovernmentPress(ctx context.Context, limit int) ([]GovernmentPr
 
 func (c *Client) WeatherAt(ctx context.Context, lat, lon float64, hours int) ([]Weather, error) {
 	if c == nil || c.openapi == nil {
-		return nil, nil
+		return nil, fmt.Errorf("aether: openapi subsystem not initialized")
 	}
 
 	internal, err := c.openapi.WeatherAt(ctx, lat, lon, hours)
@@ -268,7 +250,7 @@ func (c *Client) WeatherAt(ctx context.Context, lat, lon float64, hours int) ([]
 
 func (c *Client) WikidataLookup(ctx context.Context, name string) (*WikidataEntity, error) {
 	if c == nil || c.openapi == nil {
-		return nil, nil
+		return nil, fmt.Errorf("aether: openapi subsystem not initialized")
 	}
 
 	ent, err := c.openapi.WikidataLookup(ctx, name)

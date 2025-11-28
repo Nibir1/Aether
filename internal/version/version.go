@@ -9,4 +9,4 @@ package version
 //
 // During early development this may be a "-dev" version. For tagged
 // releases it should follow semantic versioning, e.g. "v1.0.0".
-const AetherVersion = "v0.1.0-dev"
+const AetherVersion = "v1.0.0"

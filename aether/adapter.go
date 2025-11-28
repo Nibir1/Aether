@@ -6,79 +6,79 @@
 //   • internal/model.Document        (canonical normalized document)
 //   • plugins.Document               (public plugin-facing model)
 //
-// These helpers are used by:
-//   • TransformPlugins pipeline (Normalize → Transform → Normalize)
-//   • DisplayPlugins routing and rendering
-//   • Any future adapter-style integrations inside the aether package.
+// Improvements in this version:
+//   • Added safe namespaced metadata keys: aether.url, aether.source
+//   • Added SourceURL override from plugin.Metadata["aether.url"] if present
+//   • Applied whitespace normalization (TrimSpace) consistently
+//   • Preserved plugin.Source safely without colliding with user metadata
+//   • More defensive copying + cleaner logic
 //
-// Design goals:
-//   • Single source of truth for field mapping
-//   • Stable mapping of URL / Source / Kind / Sections / Metadata
-//   • No duplication across normalize.go, display.go, toon helpers, etc.
+// These helpers are used throughout Aether’s TransformPlugins pipeline,
+// DisplayPlugins, and any adapter-style integrations.
 
 package aether
 
 import (
+	"strings"
+
 	"github.com/Nibir1/Aether/internal/model"
 	"github.com/Nibir1/Aether/plugins"
 )
 
 //
 // ───────────────────────────────────────────────────────────────────────────
-//                       MODEL → PLUGIN DOCUMENT
+//                     MODEL → PLUGIN DOCUMENT (internal → public)
 // ───────────────────────────────────────────────────────────────────────────
 //
 
-// modelToPluginDocument converts a canonical normalized model.Document into
-// a plugins.Document for use by TransformPlugins and DisplayPlugins.
-//
-// Mapping rules:
-//   - SourceURL → URL (plugin)
-//   - Kind      → Kind (string enum passthrough)
-//   - Title / Excerpt / Content copied directly
-//   - Metadata cloned (shallow copy)
-//   - Sections: Heading ↔ Title, Role + Meta preserved
-//   - If Metadata["url"] is missing but SourceURL is present, it is added.
-//   - If Metadata["source"] is missing, a default "aether:normalized" is used.
+// modelToPluginDocument converts a normalized model.Document into a
+// plugins.Document for TransformPlugins / DisplayPlugins.
 func modelToPluginDocument(doc *model.Document) *plugins.Document {
 	if doc == nil {
 		return &plugins.Document{}
 	}
 
+	// --- Clone base metadata ---
 	meta := cloneStringMap(doc.Metadata)
 	if meta == nil {
 		meta = make(map[string]string)
 	}
 
-	// Ensure a stable "url" metadata key if we have a SourceURL.
+	// --- Ensure canonical URL is represented ---
 	if doc.SourceURL != "" {
-		if _, exists := meta["url"]; !exists {
-			meta["url"] = doc.SourceURL
+		if _, exists := meta["aether.url"]; !exists {
+			meta["aether.url"] = doc.SourceURL
 		}
 	}
 
-	// Default logical source if none provided.
-	source := meta["source"]
+	// --- Stable "source" tag if none provided ---
+	source := meta["aether.source"]
 	if source == "" {
 		source = "aether:normalized"
 	}
+
+	// --- Normalize text fields ---
+	title := strings.TrimSpace(doc.Title)
+	excerpt := strings.TrimSpace(doc.Excerpt)
+	content := strings.TrimSpace(doc.Content)
 
 	p := &plugins.Document{
 		Source:   source,
 		URL:      doc.SourceURL,
 		Kind:     plugins.DocumentKind(doc.Kind),
-		Title:    doc.Title,
-		Excerpt:  doc.Excerpt,
-		Content:  doc.Content,
+		Title:    title,
+		Excerpt:  excerpt,
+		Content:  content,
 		Metadata: meta,
 		Sections: make([]plugins.Section, 0, len(doc.Sections)),
 	}
 
+	// --- Convert sections ---
 	for _, s := range doc.Sections {
 		p.Sections = append(p.Sections, plugins.Section{
 			Role:  plugins.SectionRole(s.Role),
-			Title: s.Heading,
-			Text:  s.Text,
+			Title: strings.TrimSpace(s.Heading),
+			Text:  strings.TrimSpace(s.Text),
 			Meta:  cloneStringMap(s.Meta),
 		})
 	}
@@ -88,53 +88,59 @@ func modelToPluginDocument(doc *model.Document) *plugins.Document {
 
 //
 // ───────────────────────────────────────────────────────────────────────────
-//                       PLUGIN → MODEL DOCUMENT
+//                     PLUGIN → MODEL DOCUMENT (public → internal)
 // ───────────────────────────────────────────────────────────────────────────
 //
 
-// pluginToModelDocument converts a plugins.Document produced by a
-// TransformPlugin back into the canonical internal model.Document.
-//
-// Mapping rules:
-//   - URL   → SourceURL
-//   - Kind  → Kind
-//   - Title / Excerpt / Content copied directly
-//   - Metadata cloned
-//   - If plugin.Source is non-empty and Metadata["source"] is absent,
-//     it is injected into metadata.
-//   - Sections: Title ↔ Heading, Role + Meta preserved.
+// pluginToModelDocument converts a plugin-generated Document back into
+// the canonical internal model.Document.
 func pluginToModelDocument(pdoc *plugins.Document) *model.Document {
 	if pdoc == nil {
 		return nil
 	}
 
+	// --- Clone metadata ---
 	meta := cloneStringMap(pdoc.Metadata)
 	if meta == nil {
 		meta = make(map[string]string)
 	}
 
-	// Preserve plugin-level source in metadata if not already present.
+	// --- Inject plugin source reliably under namespaced key ---
 	if pdoc.Source != "" {
-		if _, exists := meta["source"]; !exists {
-			meta["source"] = pdoc.Source
+		if _, exists := meta["aether.source"]; !exists {
+			meta["aether.source"] = pdoc.Source
 		}
 	}
 
+	// --- Assign canonical SourceURL ---
+	sourceURL := strings.TrimSpace(pdoc.URL)
+
+	// Override if metadata explicitly includes a canonical URL
+	if u, ok := meta["aether.url"]; ok && strings.TrimSpace(u) != "" {
+		sourceURL = strings.TrimSpace(u)
+	}
+
+	// --- Normalize text fields ---
+	title := strings.TrimSpace(pdoc.Title)
+	excerpt := strings.TrimSpace(pdoc.Excerpt)
+	content := strings.TrimSpace(pdoc.Content)
+
 	out := &model.Document{
-		SourceURL: pdoc.URL,
+		SourceURL: sourceURL,
 		Kind:      model.DocumentKind(pdoc.Kind),
-		Title:     pdoc.Title,
-		Excerpt:   pdoc.Excerpt,
-		Content:   pdoc.Content,
+		Title:     title,
+		Excerpt:   excerpt,
+		Content:   content,
 		Metadata:  meta,
 		Sections:  make([]model.Section, 0, len(pdoc.Sections)),
 	}
 
+	// --- Convert sections ---
 	for _, s := range pdoc.Sections {
 		out.Sections = append(out.Sections, model.Section{
 			Role:    model.SectionRole(s.Role),
-			Heading: s.Title,
-			Text:    s.Text,
+			Heading: strings.TrimSpace(s.Title),
+			Text:    strings.TrimSpace(s.Text),
 			Meta:    cloneStringMap(s.Meta),
 		})
 	}
@@ -144,12 +150,10 @@ func pluginToModelDocument(pdoc *plugins.Document) *model.Document {
 
 //
 // ───────────────────────────────────────────────────────────────────────────
-//                              MAP HELPERS
+//                             MAP HELPERS
 // ───────────────────────────────────────────────────────────────────────────
 //
 
-// cloneStringMap safely shallow-copies a map[string]string.
-// A nil input returns nil; callers may wrap with defaulting logic.
 func cloneStringMap(m map[string]string) map[string]string {
 	if m == nil {
 		return nil

@@ -6,15 +6,16 @@
 // performing HTTP GET operations using Aether's internal HTTP fetcher.
 //
 // Plugins MUST use these helpers instead of making their own HTTP requests,
-// because these methods ensure:
+// because Aether's internal fetcher ensures:
+//
 //   • robots.txt compliance
 //   • composite caching (memory + file + redis)
-//   • retry logic
-//   • rate limiting per-host
-//   • unified error handling
-//   • automatic gzip/deflate decoding
+//   • retry logic (idempotent GET only)
+//   • host-scoped rate limiting
+//   • timeout + context propagation
+//   • gz/deflate automatic decompression
+//   • stable error classification
 //
-// The internal httpclient.Client performs all legality, safety and caching.
 // These public wrappers simply forward to the internal fetcher in a controlled,
 // stable way appropriate for plugins and extensions.
 
@@ -25,23 +26,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
-// FetchRaw performs a robots.txt-compliant HTTP GET and returns:
+// FetchRaw performs a robots.txt-compliant HTTP GET.
 //
-//   - raw response body bytes
-//   - http.Header for metadata
-//   - error if the fetch fails
+// RETURN VALUES:
 //
-// The caller receives the untouched response body, suitable for:
-//   - JSON decoding
-//   - image/binary processing
-//   - plugin-level custom parsing
+//	body   []byte     — raw response body (unmodified)
+//	header http.Header — response headers
+//	error
 //
-// Plugins should ALWAYS use this instead of performing HTTP manually.
+// FetchRaw is the lowest-level public API. It does NOT try to interpret the
+// response, making it appropriate for:
+//
+//   - JSON APIs (plugin-side decoding)
+//   - images, binaries
+//   - HTML/Markdown extraction
+//   - RSS/Atom autodetection
+//
+// NOTE: All legality, robots.txt policy, retries, caching and rate limits are
+// enforced inside c.fetcher.Fetch().
 func (c *Client) FetchRaw(ctx context.Context, url string) ([]byte, http.Header, error) {
 	if c == nil || c.fetcher == nil {
 		return nil, nil, fmt.Errorf("aether: client is not initialized")
+	}
+
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return nil, nil, fmt.Errorf("aether: empty URL passed to FetchRaw")
 	}
 
 	resp, err := c.fetcher.Fetch(ctx, url, nil)
@@ -52,20 +65,25 @@ func (c *Client) FetchRaw(ctx context.Context, url string) ([]byte, http.Header,
 	return resp.Body, resp.Header, nil
 }
 
-// FetchText performs a robots.txt-compliant fetch and returns the UTF-8
-// interpretation of the response body.
+// FetchText performs a robots.txt-compliant GET and returns the body as UTF-8.
 //
-// This helper is ideal for:
-//   - Markdown files
-//   - README files
-//   - Plain text APIs
-//   - HTML extraction by plugins
+// Ideal for:
+//   - README.md
+//   - plain-text APIs
+//   - HTML before DOM extraction
+//   - plugin-readable textual sources
 //
-// It returns:
-//   - decoded string
-//   - http.Header
-//   - error
+// Returns:
+//
+//	text   string
+//	header http.Header
+//	error
 func (c *Client) FetchText(ctx context.Context, url string) (string, http.Header, error) {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return "", nil, fmt.Errorf("aether: empty URL passed to FetchText")
+	}
+
 	body, hdr, err := c.FetchRaw(ctx, url)
 	if err != nil {
 		return "", nil, err
@@ -74,21 +92,24 @@ func (c *Client) FetchText(ctx context.Context, url string) (string, http.Header
 	return string(body), hdr, nil
 }
 
-// FetchJSON performs a robots.txt-compliant fetch and unmarshals the JSON
-// response into the provided destination struct pointer.
+// FetchJSON performs a robots.txt-compliant GET and unmarshals JSON.
 //
 // Example:
 //
 //	var out MyStruct
-//	if err := cli.FetchJSON(ctx, "https://example.com/api", &out); err != nil {
+//	if err := cli.FetchJSON(ctx, "https://api.example.com", &out); err != nil {
 //	    ...
 //	}
 //
-// This helper is used internally by Aether OpenAPI integrations and is ideal
-// for plugins interacting with public JSON APIs.
+// Errors include network errors, status errors (from FetchRaw), and JSON errors.
 func (c *Client) FetchJSON(ctx context.Context, url string, dest any) error {
 	if dest == nil {
 		return fmt.Errorf("aether: FetchJSON requires a non-nil destination")
+	}
+
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return fmt.Errorf("aether: empty URL passed to FetchJSON")
 	}
 
 	body, _, err := c.FetchRaw(ctx, url)

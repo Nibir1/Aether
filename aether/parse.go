@@ -10,11 +10,12 @@
 package aether
 
 import (
+	"fmt"
+
 	ihtml "github.com/Nibir1/Aether/internal/html"
 )
 
 // ParsedHTML represents a normalized view of an HTML document.
-//
 // It is designed to be LLM-friendly and stable as a public API.
 type ParsedHTML struct {
 	Title      string
@@ -48,6 +49,10 @@ type Link struct {
 // consult robots.txt. It is intended for HTML you already have, such
 // as the body of a FetchResult.
 func (c *Client) ParseHTML(html []byte) (*ParsedHTML, error) {
+	if c == nil {
+		return nil, fmt.Errorf("aether: nil client in ParseHTML")
+	}
+
 	doc, err := ihtml.ParseDocument(html)
 	if err != nil {
 		return nil, err

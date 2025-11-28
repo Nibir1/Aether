@@ -2,14 +2,14 @@
 //
 // This file exposes the Fetch method on Client, which performs a
 // robots.txt-compliant HTTP GET using Aether's internal HTTP client.
+
 package aether
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
-
-	hclient "github.com/Nibir1/Aether/internal/httpclient"
 )
 
 // FetchResult is the public view of a completed HTTP fetch operation.
@@ -48,19 +48,13 @@ func WithHeader(key, value string) FetchOption {
 // Fetch performs a robots.txt-compliant HTTP GET for the given URL.
 //
 // It automatically:
-//   - respects robots.txt rules using the configured User-Agent,
-//   - applies polite per-host concurrency limits,
-//   - performs simple in-memory response caching,
-//   - retries transient failures with exponential backoff.
-//
-// The result is a FetchResult containing status, headers, body and
-// timestamp of retrieval.
+//   - respects robots.txt rules using the configured User-Agent
+//   - applies polite per-host concurrency limits
+//   - performs caching via the composite cache
+//   - retries transient failures with backoff
 func (c *Client) Fetch(ctx context.Context, rawURL string, opts ...FetchOption) (*FetchResult, error) {
 	if c == nil || c.fetcher == nil {
-		return nil, &Error{
-			Kind: ErrorKindConfig,
-			Msg:  "Aether client is not initialized",
-		}
+		return nil, fmt.Errorf("aether: client is not initialized")
 	}
 
 	var fo FetchOptions
@@ -79,22 +73,7 @@ func (c *Client) Fetch(ctx context.Context, rawURL string, opts ...FetchOption) 
 		URL:        resp.URL,
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header.Clone(),
-		Body:       resp.Body, // treat as read-only
+		Body:       resp.Body,
 		FetchedAt:  resp.FetchedAt,
 	}, nil
-}
-
-// internal helper to adapt errors when needed.
-// Currently this just uses the internal type directly, but keeping
-// the function around makes it easy to adjust error mapping later.
-func adaptHTTPError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if _, ok := err.(*hclient.Error); ok {
-		// httpclient.Error is already a structured error type
-		// compatible with Aether's public error alias.
-		return err
-	}
-	return err
 }

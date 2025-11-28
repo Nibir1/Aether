@@ -29,13 +29,18 @@ type DetectionResult struct {
 // Detect runs a full fetch (robots.txt-compliant), sniffs content type,
 // parses HTML only when needed, and returns a structured detection result.
 func (c *Client) Detect(ctx context.Context, url string) (*DetectionResult, error) {
+	if c == nil {
+		return nil, ErrNilClient
+	}
+
+	// Step 0: full legal fetch
 	res, err := c.Fetch(ctx, url)
 	if err != nil {
 		return nil, err
 	}
 
 	// Step 1: MIME + heuristic detection
-	dr := idetect.Detect(res.Body, res.Header)
+	dr := idetect.Detect(res.Body, res.Header.Clone())
 
 	out := &DetectionResult{
 		URL:      url,
@@ -48,7 +53,7 @@ func (c *Client) Detect(ctx context.Context, url string) (*DetectionResult, erro
 		Metadata: map[string]string{},
 	}
 
-	// Step 2: For HTML, also extract <title>, meta tags, canonical URL, etc.
+	// Step 2: For HTML, extract title, description, canonical URL, etc.
 	if dr.RawType == idetect.TypeHTML {
 		doc, err := ihtml.ParseDocument(res.Body)
 		if err == nil {

@@ -1,22 +1,49 @@
 // aether/errors.go
 //
-// This file provides public accessors for Aether's structured error
-// kinds. Internally, we use an internal/errors package to represent
-// specific failure categories such as configuration issues or robots.txt
-// violations. This wrapper re-exports those concepts in a stable way.
+// Public accessors for Aether's structured error system.
+//
+// Internally, Aether uses internal/errors to classify failure modes
+// (configuration issues, HTTP failures, robots.txt violations, parsing
+// errors, etc.). This file re-exports those types and constants in a
+// stable public API so that callers can:
+//
+//   • inspect error kinds via Error.Kind
+//   • use errors.Is / errors.As with *aether.Error
+//   • match specific failure categories without importing internal packages
+//
+// The public API intentionally mirrors internal error kinds, but keeps
+// the freedom to expand internally without breaking user code.
+
 package aether
 
-import internal "github.com/Nibir1/Aether/internal/errors"
+import (
+	internal "github.com/Nibir1/Aether/internal/errors"
+)
 
-// ErrorKind is a high-level category of Aether error.
 //
-// It is intentionally string-based so it can be logged, compared and
-// inspected easily without depending on internal implementation details.
+// ───────────────────────────────────────────────────────────────
+//                          ERROR KIND
+// ───────────────────────────────────────────────────────────────
+//
+// ErrorKind classifies structured failure categories such as:
+//
+//   • config errors
+//   • HTTP & transport errors
+//   • robots.txt violations
+//   • parsing errors
+//
+// This is re-exported from internal/errors.Kind.
+// Using a type alias guarantees binary and semantic compatibility.
+
 type ErrorKind = internal.Kind
 
-// Public error kind constants that mirror the internal error kinds.
-// These allow callers to distinguish between failure modes such as
-// configuration errors, HTTP errors or robots.txt violations.
+// Publicly visible error kind constants mirroring internal.
+//
+// These allow callers to write:
+//
+//	if err, ok := err.(*aether.Error); ok && err.Kind == aether.ErrorKindHTTP { … }
+//
+// without importing internal/errors.
 const (
 	ErrorKindUnknown ErrorKind = internal.KindUnknown
 	ErrorKindConfig  ErrorKind = internal.KindConfig
@@ -25,8 +52,23 @@ const (
 	ErrorKindParsing ErrorKind = internal.KindParsing
 )
 
-// Error is Aether's structured error type, re-exported for public use.
+// ───────────────────────────────────────────────────────────────
 //
-// Callers may use errors.Is / errors.As with this type, or inspect the
-// Kind field directly to react to specific failure categories.
+//	STRUCTURED ERROR
+//
+// ───────────────────────────────────────────────────────────────
+//
+// Error is the structured error type returned by many Aether functions.
+//
+// It contains:
+//   - Kind        (error category)
+//   - Op          (optional operation name)
+//   - URL         (optional relevant URL)
+//   - Err         (wrapped underlying error)
+//
+// Users may pattern-match with:
+//
+//	if ae, ok := err.(*aether.Error); ok {
+//	    switch ae.Kind {
+//	    case aether.ErrorKindRobots: …
 type Error = internal.Error

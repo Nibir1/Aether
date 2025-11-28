@@ -1,23 +1,21 @@
 // aether/cache.go
 //
-// This file defines the public caching configuration options for Aether.
-// The caching subsystem is a core performance, efficiency, and politeness
-// mechanism: it reduces redundant network calls, minimizes bandwidth usage,
-// speeds up high-level operations (Search, RSS, OpenAPIs), and enforces
-// predictable TTL behaviors.
+// Public caching configuration options for Aether.
 //
-// Aether supports a composite cache architecture with up to three layers:
+// Aether uses a composite caching architecture consisting of:
+//   • Memory cache (fast, in-process LRU)
+//   • File cache (persistent on disk)
+//   • Redis cache (shared/distributed)
 //
-//   1. Memory (fast LRU in-memory)
-//   2. File (hashed filenames, persistent between runs)
-//   3. Redis (shared/distributed)
+// The layers can be enabled individually or combined. When multiple layers
+// are active, lookups occur in priority order:
 //
-// Each layer may be enabled independently. When multiple layers are enabled,
-// the composite cache checks them in priority order:
+//     Memory → File → Redis → Miss
 //
-//   Memory → File → Redis → Miss
+// Lower-layer hits are automatically promoted upward.
 //
-// Cache hits at lower layers automatically promote the entry upward.
+// All cache options modify the internal *config.Config before a Client
+// instance is created via NewClient.
 
 package aether
 
@@ -28,16 +26,15 @@ import (
 	"github.com/Nibir1/Aether/internal/config"
 )
 
-// CacheOption configures Aether caching behavior.
-//
-// These options modify the internal *config.Config used by the Client.
-// They must be applied when constructing the Aether Client via NewClient.
+// CacheOption mutates internal config during client construction.
 type CacheOption func(*config.Config)
 
-// WithMemoryCache enables the in-memory LRU cache.
 //
-// maxEntries sets the maximum number of items retained in memory.
-// ttl sets the time-to-live for cached entries.
+// ───────────────────────────────────────────────────────────────
+//                     MEMORY CACHE CONFIGURATION
+// ───────────────────────────────────────────────────────────────
+//
+
 func WithMemoryCache(maxEntries int, ttl time.Duration) CacheOption {
 	return func(c *config.Config) {
 		if maxEntries > 0 {
@@ -50,10 +47,12 @@ func WithMemoryCache(maxEntries int, ttl time.Duration) CacheOption {
 	}
 }
 
-// WithFileCache enables the persistent file-backed cache.
 //
-// dir must be a writable directory for Aether to store its cached files.
-// ttl defines how long entries remain valid.
+// ───────────────────────────────────────────────────────────────
+//                        FILE CACHE CONFIGURATION
+// ───────────────────────────────────────────────────────────────
+//
+
 func WithFileCache(dir string, ttl time.Duration) CacheOption {
 	return func(c *config.Config) {
 		if dir != "" {
@@ -66,10 +65,12 @@ func WithFileCache(dir string, ttl time.Duration) CacheOption {
 	}
 }
 
-// WithRedisCache enables Redis caching.
 //
-// addr is the Redis server address (e.g., "localhost:6379").
-// ttl controls how long redis entries remain valid.
+// ───────────────────────────────────────────────────────────────
+//                        REDIS CACHE CONFIGURATION
+// ───────────────────────────────────────────────────────────────
+//
+
 func WithRedisCache(addr string, ttl time.Duration) CacheOption {
 	return func(c *config.Config) {
 		if addr != "" {
@@ -82,30 +83,58 @@ func WithRedisCache(addr string, ttl time.Duration) CacheOption {
 	}
 }
 
-// initCache attaches the unified composite cache to the Client.
 //
-// This function is invoked internally by NewClient after all configuration
-// options have been applied. It builds a composite cache using the settings
-// stored in the internal configuration.
-func (c *Client) initCache() {
-	c.cache = icache.NewComposite(icache.Config{
+// ───────────────────────────────────────────────────────────────
+//                        CACHE INITIALIZATION
+// ───────────────────────────────────────────────────────────────
+//
 
-		// Memory cache layer
+func (c *Client) initCache() {
+	if c == nil {
+		panic("aether: initCache called on nil *Client")
+	}
+	if c.cfg == nil {
+		panic("aether: initCache requires initialized config")
+	}
+	if c.logger == nil {
+		c.logger = noopLogger{}
+	}
+
+	// Normalize negative settings to safe values
+	if c.cfg.MaxCacheEntries < 0 {
+		c.cfg.MaxCacheEntries = 0
+	}
+
+	conf := icache.Config{
 		MemoryEnabled: c.cfg.EnableMemoryCache,
 		MemoryTTL:     c.cfg.CacheTTL,
 		MemoryMax:     c.cfg.MaxCacheEntries,
 
-		// File cache layer
 		FileEnabled:   c.cfg.EnableFileCache,
 		FileTTL:       c.cfg.CacheTTL,
 		FileDirectory: c.cfg.CacheDirectory,
 
-		// Redis cache layer
 		RedisEnabled: c.cfg.EnableRedisCache,
 		RedisTTL:     c.cfg.CacheTTL,
 		RedisAddress: c.cfg.RedisAddress,
 
-		// Logging integration
 		Logger: c.logger,
-	})
+	}
+
+	// NewComposite returns *Composite (ONE value)
+	c.cache = icache.NewComposite(conf)
 }
+
+//
+// ───────────────────────────────────────────────────────────────
+//                         NO-OP LOGGER
+// ───────────────────────────────────────────────────────────────
+//
+
+// noopLogger satisfies internal/log.Logger while producing no output.
+type noopLogger struct{}
+
+func (noopLogger) Infof(string, ...any)  {}
+func (noopLogger) Debugf(string, ...any) {}
+func (noopLogger) Errorf(string, ...any) {}
+func (noopLogger) Warnf(string, ...any)  {} // required by interface

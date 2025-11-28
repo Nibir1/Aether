@@ -14,6 +14,7 @@ package aether
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	irss "github.com/Nibir1/Aether/internal/rss"
 )
@@ -44,6 +45,9 @@ type Feed struct {
 // This method does NOT fetch or check robots.txt; it only parses.
 // Use FetchRSS() to fetch and parse in one call.
 func (c *Client) ParseRSS(xmlBytes []byte) (*Feed, error) {
+	if c == nil {
+		return nil, fmt.Errorf("aether: nil client")
+	}
 
 	// Step 1 — fast pre-check using DetectFeedType
 	ft := irss.DetectFeedType(xmlBytes)
@@ -86,12 +90,14 @@ func (c *Client) ParseRSS(xmlBytes []byte) (*Feed, error) {
 
 // FetchRSS fetches and parses an RSS/Atom feed, respecting robots.txt.
 //
-// This is the safe and preferred method for real-world usage.
-//
 // Example:
 //
 //	feed, err := client.FetchRSS(ctx, "https://example.com/feed.rss")
 func (c *Client) FetchRSS(ctx context.Context, url string) (*Feed, error) {
+	if c == nil {
+		return nil, fmt.Errorf("aether: nil client")
+	}
+
 	resp, err := c.Fetch(ctx, url)
 	if err != nil {
 		return nil, err

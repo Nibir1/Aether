@@ -2,17 +2,18 @@
 //
 // Public TOON (Token-Oriented Object Notation) API for Aether.
 //
-// This layer exposes:
+// This layer exposes conversion functions from Aether’s high-level
+// SearchResult and normalized model.Document into TOON 2.0 structures.
+//
 //   • ToTOON(sr *SearchResult) *toon.Document
 //   • MarshalTOON(sr *SearchResult) ([]byte, error)
 //   • MarshalTOONPretty(sr *SearchResult) ([]byte, error)
 //
-// Internal pipeline:
-//   1. aether.NormalizeSearchResult() → model.Document
-//   2. internal/toon.FromModel()      → toon.Document
+// Pipeline:
+//   1. NormalizeSearchResult() → *model.Document
+//   2. toon.FromModel()        → *toon.Document
 //
-// The TOON representation is stable, deterministic, and optimized
-// for LLM consumption, structured reasoning, and interop with tools.
+// The TOON representation is stable and structured for LLM consumption.
 
 package aether
 
@@ -25,27 +26,22 @@ import (
 
 //
 // ─────────────────────────────────────────────────────────────────────────────
-//                           CORE CONVERSION (PUBLIC)
+//                               CORE CONVERSION
 // ─────────────────────────────────────────────────────────────────────────────
 //
 
-// ToTOON converts a public SearchResult into a TOON 2.0 Document.
-//
-// Steps:
-//  1. NormalizeSearchResult → model.Document
-//  2. toon.FromModel        → toon.Document
+// ToTOON converts a SearchResult into a TOON 2.0 document.
+// Safe for nil receivers and nil SearchResult.
 func (c *Client) ToTOON(sr *SearchResult) *toon.Document {
 	if c == nil || sr == nil {
 		return &toon.Document{}
 	}
 
-	// Convert SearchResult → normalized model.Document
 	normalized := c.NormalizeSearchResult(sr)
 	if normalized == nil {
 		return &toon.Document{}
 	}
 
-	// Convert model.Document → TOON Document
 	return toon.FromModel(normalized)
 }
 
@@ -61,7 +57,7 @@ func (c *Client) MarshalTOON(sr *SearchResult) ([]byte, error) {
 	return json.Marshal(doc)
 }
 
-// MarshalTOONPretty serializes a SearchResult into pretty-printed TOON JSON.
+// MarshalTOONPretty serializes a SearchResult into pretty-printed JSON.
 func (c *Client) MarshalTOONPretty(sr *SearchResult) ([]byte, error) {
 	doc := c.ToTOON(sr)
 	return json.MarshalIndent(doc, "", "  ")
@@ -69,12 +65,13 @@ func (c *Client) MarshalTOONPretty(sr *SearchResult) ([]byte, error) {
 
 //
 // ─────────────────────────────────────────────────────────────────────────────
-//                        DIRECT MODEL → TOON HELPERS
+//                       DIRECT MODEL → TOON CONVERSIONS
 // ─────────────────────────────────────────────────────────────────────────────
 //
 
-// ToTOONFromModel converts an internal normalized document directly to TOON.
-// Useful for embedding Aether as a library when skipping SearchResult pipeline.
+// ToTOONFromModel converts a normalized internal model.Document directly
+// into a TOON document. Useful when embedding Aether as a library
+// without using SearchResult.
 func (c *Client) ToTOONFromModel(doc *model.Document) *toon.Document {
 	if doc == nil {
 		return &toon.Document{}
@@ -82,13 +79,13 @@ func (c *Client) ToTOONFromModel(doc *model.Document) *toon.Document {
 	return toon.FromModel(doc)
 }
 
-// MarshalTOONFromModel serializes a normalized Document into compact TOON JSON.
+// MarshalTOONFromModel serializes a normalized model.Document into compact JSON.
 func (c *Client) MarshalTOONFromModel(doc *model.Document) ([]byte, error) {
 	tdoc := c.ToTOONFromModel(doc)
 	return json.Marshal(tdoc)
 }
 
-// MarshalTOONPrettyFromModel serializes a normalized Document into pretty JSON.
+// MarshalTOONPrettyFromModel serializes a normalized model.Document into pretty JSON.
 func (c *Client) MarshalTOONPrettyFromModel(doc *model.Document) ([]byte, error) {
 	tdoc := c.ToTOONFromModel(doc)
 	return json.MarshalIndent(tdoc, "", "  ")
