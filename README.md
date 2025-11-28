@@ -5,12 +5,13 @@
 Aether turns arbitrary public web content into **structured, LLM‑ready representations** (JSON + TOON), with strong guarantees around **legality**, **robots.txt compliance**, **caching**, and **predictable output schemas**.
 
 - ✅ **Pure Go library** (`import "github.com/Nibir1/Aether/aether"`)
-- ✅ **Robots.txt‑compliant HTTP client** with per‑host fairness
+- ✅ **Robots.txt‑compliant HTTP client** with per‑host fairness and optional host-level robots override
 - ✅ **Multi‑layer cache** (memory + file + redis via composite cache)
 - ✅ **Article extraction**, **RSS/Atom** parsing, **OpenAPI** connectors
 - ✅ **Plugins** (Source / Transform / Display)
 - ✅ **Canonical JSON** + **TOON 2.0** + **Lite TOON** + **BTON (binary)**
 - ✅ **Streaming outputs** (JSONL + TOON event streams)
+- ✅ Fully tested across **Normal & Robots Override** modes
 - ✅ Designed for **AI engineers**, **backend devs**, and **agent frameworks**
 
 ---
@@ -38,6 +39,7 @@ Aether turns arbitrary public web content into **structured, LLM‑ready represe
    - [TOON Streaming](#13-toon-streaming)
    - [Error Handling](#14-error-handling)
    - [Configuration & Caching](#15-configuration--caching)
+   - [Robots Override](#16-robots--override)
 7. [cmd/ Test Programs](#cmd-test-programs)
 8. [Status & Roadmap](#status--roadmap)
 9. [License](#license)
@@ -214,12 +216,12 @@ if err != nil {
 │  (intent,     │                    │  & OpenAPIs   │                       │  (Source)   │
 │  routing)     │                    │               │                       │             │
 └──────┬────────┘                    └──────┬────────┘                       └──────┬──────┘
-       │                                   │                                        │
-       │                         ┌─────────▼─────────┐                              │
-       │                         │ robots-aware HTTP │                              │
-       │                         │  + Composite Cache│                              │
-       │                         │ (memory/file/redis)                              │
-       │                         └─────────┬─────────┘                              │
+       │                                    │                                       │
+       │                         ┌──────────▼─────────┐                             │
+       │                         │ robots-aware HTTP  │                             │
+       │                         │  + Composite Cache │                             │
+       │                         │ (memory/file/redis)│                             │
+       │                         └─────────┬──────────┘                             │
        │                                   │                                        │
        │                         ┌─────────▼───────────┐                            │
        │                         │  Content Detection  │                            │
@@ -934,6 +936,61 @@ The internal composite cache supports:
 - Redis cache (for shared/distributed setups)
 
 Configuration is wired through `internal/config` + `internal/cache` and surfaced via `EffectiveConfig`.
+
+---
+
+### 16. Robots Override
+
+Aether `NewClient` supports **robots override** options to selectively bypass `robots.txt` for certain hosts. This is **host-specific** and still respects robots rules for all other domains.
+
+#### Usage: Boolean Enable (Global Override)
+
+Enable robots override for advanced use-cases (use with caution, responsibility lies with the caller):
+
+```go
+cli, err := aether.NewClient(
+    aether.WithDebugLogging(true),
+    aether.WithRobotsOverride(true), // enables global override mode
+)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+#### Usage: Host List (Selective Override)
+
+Override robots rules for specific hosts only:
+
+```go
+cli, err := aether.NewClient(
+    aether.WithDebugLogging(true),
+    aether.WithRobotsOverride(
+        "hnrss.org",
+        "news.ycombinator.com",
+        "example.com",
+    ),
+)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+#### Inspect Configuration
+
+Check which hosts are allowed and whether override is enabled:
+
+```go
+cfg := cli.EffectiveConfig()
+fmt.Println("Robots Override Enabled:", cfg.RobotsOverrideEnabled)
+fmt.Println("Robots Allowed Hosts:", cfg.RobotsAllowedHosts)
+```
+
+#### Notes
+
+* Hosts are matched **case-insensitively** and without port.
+* Responsibility for ignoring robots rules lies entirely with the caller.
+* Aether will still obey robots rules for all hosts not explicitly listed.
+* Useful for internal testing, public data aggregation, or legal-use scenarios where host consent is verified.
 
 ---
 
