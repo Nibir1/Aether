@@ -14,10 +14,10 @@ import (
 func main() {
 
 	// ================================================================
-	//  A) TEST WITH NORMAL CLIENT — robots.txt respected (default)
+	//  A) NORMAL CLIENT — robots.txt respected
 	// ================================================================
 	fmt.Println("\n====================================================")
-	fmt.Println("A) OPENAPI TESTS — ROBOTS.TXT MODE (DEFAULT)")
+	fmt.Println("OPENAPI TESTS — NORMAL CLIENT (robots.txt respected)")
 	fmt.Println("====================================================")
 
 	cliNormal, err := aether.NewClient(
@@ -27,40 +27,33 @@ func main() {
 		log.Fatalf("failed to create normal Aether client: %v", err)
 	}
 
-	runOpenAPITests("NORMAL MODE (robots ON)", cliNormal)
+	runOpenAPITests("NORMAL CLIENT", cliNormal)
 
 	// ================================================================
-	//  B) TEST WITH ROBOTS OVERRIDE CLIENT — Hacker News bypassed
+	//  B) OVERRIDE CLIENT — Hacker News allowed
 	// ================================================================
-	//
-	// HN denies API crawling via robots.txt. We explicitly override it
-	// ONLY for *.ycombinator.com — everything else stays safe.
-	//
-	// This mirrors Option A (legal opt-in: user takes responsibility).
-	// ================================================================
-
 	fmt.Println("\n====================================================")
-	fmt.Println("B) OPENAPI TESTS — ROBOTS OVERRIDE FOR HN")
+	fmt.Println("OPENAPI TESTS — ROBOTS OVERRIDE CLIENT (HN allowed)")
 	fmt.Println("====================================================")
 
 	cliOverride, err := aether.NewClient(
 		aether.WithDebugLogging(true),
-		aether.WithRobotsOverride("news.ycombinator.com", "hacker-news.firebaseio.com"),
+		aether.WithRobotsOverride("hacker-news.firebaseio.com"),
 	)
 	if err != nil {
 		log.Fatalf("failed to create override Aether client: %v", err)
 	}
 
-	runOpenAPITests("ROBOTS OVERRIDE MODE (HN allowed)", cliOverride)
+	runOpenAPITests("OVERRIDE CLIENT", cliOverride)
 }
 
 // ------------------------------------------------------------
 // Shared Test Runner
 // ------------------------------------------------------------
 func runOpenAPITests(label string, cli *aether.Client) {
-	fmt.Println("\n>>> Running test suite for:", label)
+	fmt.Println("\n>>> Running OpenAPI test suite for:", label)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// --------------------------------------------------------
@@ -84,21 +77,21 @@ func runOpenAPITests(label string, cli *aether.Client) {
 	}
 
 	// --------------------------------------------------------
-	// 2) Hacker News — THIS IS WHERE ROBOTS OVERRIDE MATTERS
+	// 2) Hacker News Top Stories — Normalized Documents
 	// --------------------------------------------------------
-	fmt.Println("-> HackerNewsTopStories(limit=3)")
-	hn, err := cli.HackerNewsTopStories(ctx, 3)
+	fmt.Println("-> HackerNewsTopStoriesDocuments(limit=3)")
+	hnDocs, err := cli.HackerNewsTopStoriesDocuments(ctx, 3)
 	if err != nil {
-		log.Printf("HackerNewsTopStories error: %v", err)
-	} else if hn == nil {
-		fmt.Println("  HackerNewsTopStories returned nil")
+		log.Printf("HackerNewsTopStoriesDocuments error: %v", err)
+	} else if hnDocs == nil {
+		fmt.Println("  HackerNewsTopStoriesDocuments returned nil")
 	} else {
-		for i, s := range hn {
-			fmt.Printf("  Story %d: [%d] %s (score=%d, by=%s)\n",
-				i+1, s.ID, s.Title, s.Score, s.Author)
-			fmt.Printf("    URL: %s\n", s.URL)
+		for i, doc := range hnDocs {
+			fmt.Printf("  Story %d: %s\n", i+1, doc.Title)
+			fmt.Printf("    Excerpt: %s\n", doc.Excerpt)
+			fmt.Printf("    URL: %s\n", doc.SourceURL)
+			fmt.Printf("    Metadata: %+v\n\n", doc.Metadata)
 		}
-		fmt.Println()
 	}
 
 	// --------------------------------------------------------

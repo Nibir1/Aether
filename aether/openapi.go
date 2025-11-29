@@ -9,6 +9,8 @@ package aether
 import (
 	"context"
 	"fmt"
+
+	"github.com/Nibir1/Aether/internal/model"
 )
 
 //
@@ -128,6 +130,15 @@ func (c *Client) HackerNewsTopStories(ctx context.Context, limit int) ([]HackerN
 		})
 	}
 	return out, nil
+}
+
+// HackerNewsTopStoriesDocuments fetches top N stories and converts
+// them into model.Document objects ready for JSON / TOON / Lite TOON / BTON pipelines.
+func (c *Client) HackerNewsTopStoriesDocuments(ctx context.Context, limit int) ([]*model.Document, error) {
+	if c == nil || c.openapi == nil {
+		return nil, fmt.Errorf("aether: openapi subsystem not initialized")
+	}
+	return c.openapi.HackerNewsTopStoriesDocuments(ctx, limit)
 }
 
 //
