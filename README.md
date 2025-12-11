@@ -2,6 +2,14 @@
 
 > **Aether** is a legal, robots.txt-compliant, open‑data retrieval and normalization toolkit for Go — built for **LLM / RAG / agentic AI systems**.
 
+---
+
+[![Aether Demo](https://img.youtube.com/vi/Q2R5zOgeuaA/maxresdefault.jpg)](https://youtu.be/Q2R5zOgeuaA)
+
+> 📺 **[Watch the full end-to-end demo](https://youtu.be/Q2R5zOgeuaA)** featuring core functionalities.
+
+---
+
 Aether turns arbitrary public web content into **structured, LLM‑ready representations** (JSON + TOON), with strong guarantees around **legality**, **robots.txt compliance**, **caching**, and **predictable output schemas**.
 
 - ✅ **Pure Go library** (`import "github.com/Nibir1/Aether/aether"`)
